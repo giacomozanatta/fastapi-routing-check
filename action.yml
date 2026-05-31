@@ -41,6 +41,10 @@ inputs:
     description: 'Post (or update) a sticky comment on the PR with a markdown table linking each finding to file:line on the analysed commit. Requires GITHUB_TOKEN with pull-requests:write.'
     required: false
     default: 'true'
+  endpoint-delta:
+    description: 'On pull_request events, also analyse the PR''s merge-base and diff its endpoints.tsv against the head''s, emitting delta.json (added / removed / moved endpoints). Doubles analysis time on cache miss (mitigated by actions/cache keyed on the merge-base SHA + analyzer hash). Set to "false" to skip the baseline analysis entirely.'
+    required: false
+    default: 'true'
 
 outputs:
   endpoints-count:
@@ -58,6 +62,18 @@ outputs:
   sarif-path:
     description: 'Path to the SARIF 2.1.0 file. Pipe into github/codeql-action/upload-sarif@v3 to render findings in the PR Code Scanning / Security tab. Emitted unconditionally (empty results array clears stale findings on the branch).'
     value: ${{ steps.run.outputs.sarif-path }}
+  delta-path:
+    description: 'Path to delta.json — the endpoint-level diff between the PR''s merge-base and HEAD. Empty on non-PR events or when endpoint-delta is set to false. Schema: {status, totals: {baseline, head, added, removed, moved, unchanged}, added: [{method, path, file, line}], removed: [...], moved: [{method, path, from, to, added_sites, removed_sites}]}.'
+    value: ${{ steps.delta.outputs.delta-path }}
+  endpoints-added:
+    description: 'Number of (method, path) pairs in HEAD but not in the merge-base. 0 on non-PR events.'
+    value: ${{ steps.delta.outputs.endpoints-added }}
+  endpoints-removed:
+    description: 'Number of (method, path) pairs in the merge-base but not in HEAD. 0 on non-PR events.'
+    value: ${{ steps.delta.outputs.endpoints-removed }}
+  endpoints-moved:
+    description: 'Number of (method, path) pairs in both that changed their set of (file, line) registration sites — refactors or duplicate-include fixes/regressions. 0 on non-PR events.'
+    value: ${{ steps.delta.outputs.endpoints-moved }}
 
 runs:
   using: 'composite'
@@ -67,6 +83,64 @@ runs:
       with:
         distribution: 'corretto'
         java-version: '25'
+
+    # ---------------------------------------------------------------------
+    # endpoint-delta: pre-analyse the merge-base so the head analysis below
+    # has a baseline endpoints.tsv to diff against. Only meaningful on
+    # pull_request events; non-PR events skip every step in this section.
+    #
+    # Cache key includes the analyzer's bytecode hash + the action's own
+    # logic, NOT just the merge-base SHA — diffing baseline-from-old-
+    # analyzer against head-from-new-analyzer would manufacture wholesale
+    # phantom "moves" whenever the bundled analyzer changes parsing
+    # behaviour. No restore-keys fallback for the same reason: exact match
+    # or full miss, never a looser bag.
+    # ---------------------------------------------------------------------
+    - name: Resolve PR merge-base
+      id: merge-base
+      if: github.event_name == 'pull_request' && inputs.endpoint-delta == 'true'
+      shell: bash
+      run: |
+        # actions/checkout's default depth=1 doesn't include the base; deepen.
+        git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+        if MB=$(git merge-base "origin/${{ github.base_ref }}" HEAD 2>/dev/null); then
+          echo "sha=$MB" >> "$GITHUB_OUTPUT"
+          echo "Merge-base: $MB"
+        else
+          # PRs from forks, shallow checkouts, or unusual refspecs may
+          # leave us without a resolvable merge-base. Skip the delta
+          # rather than crash.
+          echo "::warning::Could not resolve merge-base against origin/${{ github.base_ref }}; skipping endpoint delta."
+          echo "sha=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore baseline endpoints cache
+      id: baseline-cache
+      if: steps.merge-base.outputs.sha != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.output-dir }}-baseline/endpoints.tsv
+        # Hash the bundled analyzer JARs + the action's wiring so a bump
+        # to either invalidates the cache (correct behaviour — see comment
+        # block above).
+        key: lisa-endpoints-${{ runner.os }}-${{ steps.merge-base.outputs.sha }}-${{ hashFiles('action.yml', 'entrypoint.sh', 'bin/parse-endpoints.py', 'dist/lisa-network/lib/**') }}
+
+    - name: Analyse merge-base (cache miss)
+      if: steps.merge-base.outputs.sha != '' && steps.baseline-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        MAIN_FILE: ${{ inputs.main-file }}
+        PROJECT_DIR: ${{ inputs.project-dir }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        JVM_HEAP: ${{ inputs.jvm-heap }}
+        ACTION_PATH: ${{ github.action_path }}
+        MERGE_BASE_SHA: ${{ steps.merge-base.outputs.sha }}
+      # Worktree-checkout the merge-base into a sibling directory so the
+      # PR's checkout in $GITHUB_WORKSPACE is untouched; the head analysis
+      # below runs against the unchanged tree. Only endpoints.tsv is
+      # cached — final-network.{pdf,html,mmd}, report.json, and the SARIF
+      # are head-only concerns.
+      run: bash "${ACTION_PATH}/bin/run-baseline-analysis.sh"
 
     - name: Run lisa-network
       id: run
@@ -84,3 +158,40 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         GH_TOKEN: ${{ github.token }}
       run: bash "${ACTION_PATH}/entrypoint.sh"
+
+    # Always run delta computation — if baseline endpoints.tsv is missing
+    # (non-PR event, cache miss + analysis failure, fork PR with no
+    # merge-base), compute-delta.py treats it as "first run, no baseline"
+    # and emits a delta.json with empty added/removed/moved arrays. The
+    # script also handles asymmetric-zero (one side crashed) gracefully.
+    - name: Compute endpoint delta
+      id: delta
+      if: always() && steps.run.conclusion != 'skipped'
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
+        BASELINE_TSV="$WORKSPACE/${OUTPUT_DIR}-baseline/endpoints.tsv"
+        HEAD_TSV="$WORKSPACE/${OUTPUT_DIR}/endpoints.tsv"
+        DELTA_JSON="$WORKSPACE/${OUTPUT_DIR}/delta.json"
+        # Both compute-delta.py args must exist as paths; create an empty
+        # baseline file if there's no merge-base (non-PR event) so the
+        # script doesn't fall through FileNotFoundError. Empty + populated
+        # = "first run, no baseline" semantically.
+        [[ -f "$BASELINE_TSV" ]] || { mkdir -p "$(dirname "$BASELINE_TSV")"; : > "$BASELINE_TSV"; }
+        [[ -f "$HEAD_TSV" ]]     || { mkdir -p "$(dirname "$HEAD_TSV")";     : > "$HEAD_TSV"; }
+        python3 "${ACTION_PATH}/bin/compute-delta.py" "$BASELINE_TSV" "$HEAD_TSV" "$DELTA_JSON"
+        # Parse the totals back out for action outputs.
+        python3 - "$DELTA_JSON" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, sys
+        d = json.load(open(sys.argv[1]))
+        t = d.get("totals", {})
+        print(f"endpoints-added={t.get('added', 0)}")
+        print(f"endpoints-removed={t.get('removed', 0)}")
+        print(f"endpoints-moved={t.get('moved', 0)}")
+        PY
+        # Path is relative to $WORKSPACE so consumers can reference it the
+        # same way as report-path / sarif-path.
+        echo "delta-path=${OUTPUT_DIR}/delta.json" >> "$GITHUB_OUTPUT"

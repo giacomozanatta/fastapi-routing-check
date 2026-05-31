@@ -22,25 +22,61 @@ permissions:
   security-events: write # required for the upload-sarif self-test step
 
 jobs:
-  fastapi-routing-check:
+  # Pure-Python unit tests for compute-delta.py — fast, no analyzer in the
+  # loop, runs on every event. The action job below exercises the
+  # end-to-end wiring (merge-base resolution, cache, baseline analysis).
+  delta-unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Run compute-delta unit tests
+        run: python3 test/test_compute_delta.py
 
+  fastapi-routing-check:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so the merge-base step inside the action can
+      # resolve `origin/<base_ref>` for endpoint-delta. The action's own
+      # `git fetch --depth=200` covers most cases, but PRs from forks
+      # with squashed histories sometimes need the full depth.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # continue-on-error: the fixture seeds 4 high-severity findings and
+      # we keep fail-on-finding: 'true' so the self-test exercises the
+      # gate path. Without continue-on-error the job goes red on the
+      # gate's intentional exit-1 and every subsequent step skips —
+      # Verify never runs and we lose visibility into the actual
+      # assertions. Verify asserts steps.run.outcome == 'failure' so a
+      # regression that breaks the gate (action returns 0 on findings)
+      # still fails the self-test.
       - name: Run action against test/fixture
         id: run
+        continue-on-error: true
         uses: ./
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
           fail-on-finding: 'true'
 
+      # if: always() because the Run step intentionally exits 1 on the
+      # fixture's seeded high-severity findings (fail-on-finding: 'true'
+      # exercises the gate path). Without always(), the Verify step
+      # gets skipped on every run and the assertions never execute.
       - name: Verify outputs
+        if: always() && steps.run.conclusion != 'skipped' && steps.run.conclusion != 'cancelled'
         run: |
+          echo "run.outcome           = ${{ steps.run.outcome }}"
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
           echo "sarif-path=${{ steps.run.outputs.sarif-path }}"
+          # Gate-fired assertion: the fixture has 4 high-severity findings
+          # and fail-on-finding is 'true', so the action MUST exit non-zero.
+          # If it returned success here, the gate is broken and a real
+          # downstream consumer would silently merge broken routing.
+          test "${{ steps.run.outcome }}" = "failure"
           # The fixture seeds one defect per family: assert the pipeline
           # ran (endpoints recovered), that every family was detected, and
           # that no false positives leaked in from the clean routers.
@@ -87,6 +123,27 @@ jobs:
           assert len(run['results']) >= 1, 'expected >=1 SARIF result'
           print(f'SARIF OK: {len(run[\"results\"])} result(s), {len(rule_ids)} rule(s)')
           "
+          # Endpoint delta wiring: on a pull_request event the action
+          # should have analysed the merge-base, cached endpoints.tsv,
+          # and emitted delta.json. On push / workflow_dispatch the
+          # delta.json still exists (action falls back to empty-baseline
+          # semantics) but with no real merge-base, totals will reflect
+          # the head-only view.
+          DELTA="${{ steps.run.outputs.delta-path }}"
+          test -n "$DELTA"
+          test -f "$DELTA"
+          python3 -c "
+          import json
+          d = json.load(open('$DELTA'))
+          assert d['status'] in ('ok', 'suppressed-asymmetric-zero'), d['status']
+          assert 'totals' in d and set(d['totals']) >= {'baseline', 'head', 'added', 'removed', 'moved', 'unchanged'}
+          for key in ('added', 'removed', 'moved'):
+              assert isinstance(d[key], list), f'{key} should be a list'
+          print(f'delta wiring OK: status={d[\"status\"]} totals={d[\"totals\"]}')
+          # On a pull_request event this PR should produce a non-trivial
+          # delta because this PR adds the bigger fixture / changes wiring.
+          # On push/dispatch (no merge-base) head==baseline by construction.
+          "
 
       # On a private user-owned repo (no GHAS) this 403s; continue-on-error
       # keeps the self-test green so the SARIF assertion above is what
@@ -109,5 +166,6 @@ jobs:
           path: |
             lisa-network-out/report.json
             lisa-network-out/results.sarif
+            lisa-network-out/delta.json
             lisa-network-out/final-network.pdf
             lisa-network-out/final-network.txt

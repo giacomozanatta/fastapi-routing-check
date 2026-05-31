@@ -35,6 +35,7 @@ A complete sample workflow is in
 | `jvm-heap` | no | `4g` | `-Xmx` for the analyzer JVM. |
 | `annotations` | no | `false` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. Default off because uploading SARIF (see `sarif-path`) gives the same surface via GHAS Code Scanning; enabling both renders each finding twice on the same line. Turn back on when you do not upload SARIF (e.g. a private repo without GHAS). |
 | `comment-on-pr` | no | `true` | Post (and update in place on reruns) a sticky PR-level comment with file:line links. Requires `pull-requests: write`. |
+| `endpoint-delta` | no | `true` | On `pull_request` events, also analyse the PR's merge-base and diff its endpoint inventory against the head's; emits `delta.json` (added / removed / moved endpoints). Doubles analysis time on cache miss, mitigated by `actions/cache` keyed on the merge-base SHA + analyzer hash. Set to `false` to skip the baseline analysis entirely. |
 
 ## Outputs
 
@@ -45,6 +46,10 @@ A complete sample workflow is in
 | `high-severity-count` | Findings at severity `high`. |
 | `report-path` | Path to `report.json`. |
 | `sarif-path` | Path to `results.sarif` (SARIF 2.1.0). Pipe into `github/codeql-action/upload-sarif@v3` to render findings in the PR's Code Scanning / Security tab. Emitted unconditionally (empty results array clears stale findings on the branch). |
+| `delta-path` | Path to `delta.json` — endpoint-level diff between the PR's merge-base and HEAD. Schema: `{status, totals: {baseline, head, added, removed, moved, unchanged}, added: […], removed: […], moved: […]}`. Empty `added`/`removed`/`moved` arrays on non-PR events. |
+| `endpoints-added` | Number of `(method, path)` pairs in HEAD but not in the merge-base. |
+| `endpoints-removed` | Number of `(method, path)` pairs in the merge-base but not in HEAD. |
+| `endpoints-moved` | Number of `(method, path)` pairs in both whose registration sites (file:line) changed — captures refactors *and* duplicate-include defects being fixed or introduced. |
 
 ## What gets surfaced in the PR
 
