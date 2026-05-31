@@ -31,6 +31,9 @@ def get_item(item_id: str):
 def get_featured():
     return {"items": ["a", "b"], "via": "literal"}
 
+@items_router.get("search")
+def search():
+  returrn {}
 
 # Duplicate include — second mount of the same router at the same prefix.
 app.include_router(users_router, prefix="/api/v1")
