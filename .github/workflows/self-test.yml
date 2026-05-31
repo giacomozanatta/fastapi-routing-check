@@ -19,6 +19,7 @@ on:
 permissions:
   contents: read
   pull-requests: write   # required for the sticky PR comment
+  security-events: write # required for the upload-sarif self-test step
 
 jobs:
   fastapi-routing-check:
@@ -32,13 +33,14 @@ jobs:
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
-          fail-on-finding: 'false'
+          fail-on-finding: 'true'
 
       - name: Verify outputs
         run: |
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
+          echo "sarif-path=${{ steps.run.outputs.sarif-path }}"
           # The fixture seeds one defect per family: assert the pipeline
           # ran (endpoints recovered), that every family was detected, and
           # that no false positives leaked in from the clean routers.
@@ -65,6 +67,39 @@ jobs:
           assert not missing, f"families not detected: {missing}"
           print("all defect families detected")
           PY
+          # SARIF must exist, parse as 2.1.0, and every result's ruleId
+          # must resolve against the declared rule catalogue. This is the
+          # self-test for the SARIF emission pipeline itself — separate
+          # from the family-detection assertions above which test the
+          # analyser.
+          SARIF="${{ steps.run.outputs.sarif-path }}"
+          test -f "$SARIF"
+          python3 -c "
+          import json, sys
+          s = json.load(open('$SARIF'))
+          assert s['version'] == '2.1.0', s['version']
+          run = s['runs'][0]
+          rule_ids = {r['id'] for r in run['tool']['driver']['rules']}
+          for r in run['results']:
+              assert r['ruleId'] in rule_ids, f'orphan ruleId: {r[\"ruleId\"]}'
+              assert r['level'] in ('error', 'warning', 'note', 'none'), r['level']
+              assert 'message' in r and 'text' in r['message']
+          assert len(run['results']) >= 1, 'expected >=1 SARIF result'
+          print(f'SARIF OK: {len(run[\"results\"])} result(s), {len(rule_ids)} rule(s)')
+          "
+
+      # On a private user-owned repo (no GHAS) this 403s; continue-on-error
+      # keeps the self-test green so the SARIF assertion above is what
+      # actually exercises the SARIF surface. Once the repo is public or
+      # moved under an org with GHAS, this step will populate the
+      # Security tab as a bonus.
+      - name: Upload SARIF to Code Scanning
+        if: always() && steps.run.outputs.sarif-path != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.run.outputs.sarif-path }}
+          category: fastapi-routing-check
 
       - name: Upload analysis artefacts
         if: always()
@@ -73,5 +108,6 @@ jobs:
           name: lisa-network-report
           path: |
             lisa-network-out/report.json
+            lisa-network-out/results.sarif
             lisa-network-out/final-network.pdf
             lisa-network-out/final-network.txt

@@ -14,6 +14,7 @@ permissions:
   contents: read
   pull-requests: write   # required to post / update the sticky PR comment
   checks: write          # reserved for the optional Checks API mode
+  security-events: write # required to upload SARIF to GitHub Code Scanning
 
 jobs:
   routing:
@@ -31,6 +32,30 @@ jobs:
           annotations: 'true'      # inline annotations on the Files Changed tab
           comment-on-pr: 'true'    # sticky PR comment with file:line links
 
+      # Upload SARIF to GitHub Code Scanning so findings render natively
+      # in the PR's Security tab. Runs on `always()` so the SARIF is
+      # uploaded even when the action gated the job on high-severity
+      # findings (otherwise the upload would be skipped on the same runs
+      # where the findings actually exist). `category` keeps these
+      # results in their own bucket so other analyzers' findings on the
+      # same ref are not overwritten.
+      #
+      # GitHub Code Scanning is FREE on public repositories. On PRIVATE
+      # repos it requires GitHub Advanced Security (GHAS), which is only
+      # available on Enterprise plans for organisations — without GHAS,
+      # this upload step will fail with a 403. `continue-on-error: true`
+      # keeps the job green in that case; reviewers consume the SARIF
+      # via the artefact uploaded below (VS Code's "SARIF Viewer"
+      # extension renders it locally), and the sticky PR comment +
+      # inline annotations continue to surface findings without GHAS.
+      - name: Upload SARIF to Code Scanning
+        if: always() && steps.check.outputs.sarif-path != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.check.outputs.sarif-path }}
+          category: fastapi-routing-check
+
       - name: Upload analysis artefacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -38,6 +63,7 @@ jobs:
           name: lisa-network-report
           path: |
             lisa-network-out/report.json
+            lisa-network-out/results.sarif
             lisa-network-out/final-network.pdf
             lisa-network-out/final-network.txt
 

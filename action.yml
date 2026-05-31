@@ -55,6 +55,9 @@ outputs:
   report-path:
     description: 'Path to the report.json file containing all findings.'
     value: ${{ steps.run.outputs.report-path }}
+  sarif-path:
+    description: 'Path to the SARIF 2.1.0 file. Pipe into github/codeql-action/upload-sarif@v3 to render findings in the PR Code Scanning / Security tab. Emitted unconditionally (empty results array clears stale findings on the branch).'
+    value: ${{ steps.run.outputs.sarif-path }}
 
 runs:
   using: 'composite'
