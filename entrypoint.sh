@@ -85,6 +85,18 @@ SEV_RE   = re.compile(r"^\[[^\]]+\]\s*\[(HIGH|MEDIUM)\]\s*(.+)$", re.MULTILINE)
 # render — repo-relative.
 LOC_RE       = re.compile(r"(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):(\d+)")
 LOC_QUOTED   = re.compile(r"'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
+# For duplicate-include findings the message body lists every include
+# site with a (runs)/(dead) tag, e.g.
+#   "Include sites:
+#       (runs)  'app/main.py':36:49
+#       (dead)  'app/main.py':37:49"
+# The (dead) site is the redundant include the developer should delete,
+# so it is the right annotation anchor — without this override the
+# parser would otherwise grab the router-allocation site baked into
+# the title (heap[s]:pp@'...':14:25), pointing at the APIRouter() call
+# rather than the duplicate include_router(...) line.
+DEAD_INC_RE  = re.compile(r"\(dead\)\s+'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
+ANY_INC_RE   = re.compile(r"\((?:runs|dead)\)\s+'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
 FAMILY_KEYS = [
     ("wrong handler",            "wrong-handler"),
     ("duplicate include",        "duplicate-include"),
@@ -115,7 +127,14 @@ for w in warnings:
     sev, title = m.group(1), m.group(2).strip()
     fam = family_of(title)
     title = INTERNAL_ID_RE.sub("", title).strip()
-    loc = LOC_RE.search(msg) or LOC_QUOTED.search(msg)
+    # Family-specific anchor selection: for duplicate-include the
+    # right line is the (dead) include site in the body; for everything
+    # else the first :line: reference in the message is correct.
+    loc = None
+    if fam == "duplicate-include":
+        loc = DEAD_INC_RE.search(msg) or ANY_INC_RE.search(msg)
+    if loc is None:
+        loc = LOC_RE.search(msg) or LOC_QUOTED.search(msg)
     # Use "-" as a sentinel for "unresolved" so bash `read` with IFS=$'\t'
     # does not collapse the empty field (tab is whitespace; consecutive
     # whitespace IFS chars are treated as a single delimiter).
