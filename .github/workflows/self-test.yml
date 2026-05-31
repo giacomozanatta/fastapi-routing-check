@@ -1,14 +1,15 @@
-# Sanity-check the action against a tiny in-tree FastAPI fixture whose
-# routing topology is clean (every path resolves to exactly one
-# handler). On every PR the workflow:
+# Sanity-check the action against an in-tree FastAPI fixture that seeds
+# one defect from every family the routing checker can detect, alongside
+# intentionally clean routers that must NOT trigger findings. On every PR
+# the workflow:
 #   1. runs the action against test/fixture/
-#   2. asserts the structured outputs are populated
+#   2. asserts every defect family was detected (and none were missed)
 #   3. exercises the sticky-PR-comment + inline-annotation surfaces
 #      against the live PR
-# fail-on-finding is 'true': the fixture is defect-free, so the run must
-# stay green. The assertion step verifies the pipeline actually ran
-# (endpoints were recovered) and raised no false positives
-# (findings-count == 0).
+# fail-on-finding is 'false' so the workflow stays green despite the
+# fixture's intentional defects; the assertion step verifies the analyser
+# DID detect them — one per family — with no false positives leaking in
+# from the clean routers.
 name: LiSA
 
 on:
@@ -18,34 +19,144 @@ on:
 permissions:
   contents: read
   pull-requests: write   # required for the sticky PR comment
+  security-events: write # required for the upload-sarif self-test step
 
 jobs:
-  fastapi-routing-check:
+  # Pure-Python unit tests for compute-delta.py — fast, no analyzer in the
+  # loop, runs on every event. The action job below exercises the
+  # end-to-end wiring (merge-base resolution, cache, baseline analysis).
+  delta-unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Run compute-delta unit tests
+        run: python3 test/test_compute_delta.py
 
+  fastapi-routing-check:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so the merge-base step inside the action can
+      # resolve `origin/<base_ref>` for endpoint-delta. The action's own
+      # `git fetch --depth=200` covers most cases, but PRs from forks
+      # with squashed histories sometimes need the full depth.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # continue-on-error: the fixture seeds 4 high-severity findings and
+      # we keep fail-on-finding: 'true' so the self-test exercises the
+      # gate path. Without continue-on-error the job goes red on the
+      # gate's intentional exit-1 and every subsequent step skips —
+      # Verify never runs and we lose visibility into the actual
+      # assertions. Verify asserts steps.run.outcome == 'failure' so a
+      # regression that breaks the gate (action returns 0 on findings)
+      # still fails the self-test.
       - name: Run action against test/fixture
         id: run
+        continue-on-error: true
         uses: ./
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
           fail-on-finding: 'true'
 
+      # if: always() because the Run step intentionally exits 1 on the
+      # fixture's seeded high-severity findings (fail-on-finding: 'true'
+      # exercises the gate path). Without always(), the Verify step
+      # gets skipped on every run and the assertions never execute.
       - name: Verify outputs
+        if: always() && steps.run.conclusion != 'skipped' && steps.run.conclusion != 'cancelled'
         run: |
+          echo "run.outcome           = ${{ steps.run.outcome }}"
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
-          # The fixture is defect-free: assert the pipeline actually ran
-          # (at least one endpoint recovered — 0 would mean discovery is
-          # broken even though the run succeeded) and that it raised no
-          # false positives (findings-count == 0).
+          echo "sarif-path=${{ steps.run.outputs.sarif-path }}"
+          # Gate-fired assertion: the fixture has 4 high-severity findings
+          # and fail-on-finding is 'true', so the action MUST exit non-zero.
+          # If it returned success here, the gate is broken and a real
+          # downstream consumer would silently merge broken routing.
+          test "${{ steps.run.outcome }}" = "failure"
+          # The fixture seeds one defect per family: assert the pipeline
+          # ran (endpoints recovered), that every family was detected, and
+          # that no false positives leaked in from the clean routers.
           test "${{ steps.run.outputs.endpoints-count }}" -ge 1
-          test "${{ steps.run.outputs.findings-count }}" -eq 0
+          test "${{ steps.run.outputs.findings-count }}" -eq 6
+          test "${{ steps.run.outputs.high-severity-count }}" -eq 4
           test -f "${{ steps.run.outputs.report-path }}"
           test -f lisa-network-out/final-network.pdf
+          # Every detectable family must appear by its warning headline.
+          python3 - "${{ steps.run.outputs.report-path }}" <<'PY'
+          import json, sys
+          msgs = "\n".join(
+              w.get("message", "")
+              for w in (json.load(open(sys.argv[1])).get("warnings") or [])
+          ).lower()
+          needed = [
+              "duplicate include",
+              "wrong handler",
+              "handler is dead code",
+              "duplicate registration",
+              "conditional registration",
+          ]
+          missing = [n for n in needed if n not in msgs]
+          assert not missing, f"families not detected: {missing}"
+          print("all defect families detected")
+          PY
+          # SARIF must exist, parse as 2.1.0, and every result's ruleId
+          # must resolve against the declared rule catalogue. This is the
+          # self-test for the SARIF emission pipeline itself — separate
+          # from the family-detection assertions above which test the
+          # analyser.
+          SARIF="${{ steps.run.outputs.sarif-path }}"
+          test -f "$SARIF"
+          python3 -c "
+          import json, sys
+          s = json.load(open('$SARIF'))
+          assert s['version'] == '2.1.0', s['version']
+          run = s['runs'][0]
+          rule_ids = {r['id'] for r in run['tool']['driver']['rules']}
+          for r in run['results']:
+              assert r['ruleId'] in rule_ids, f'orphan ruleId: {r[\"ruleId\"]}'
+              assert r['level'] in ('error', 'warning', 'note', 'none'), r['level']
+              assert 'message' in r and 'text' in r['message']
+          assert len(run['results']) >= 1, 'expected >=1 SARIF result'
+          print(f'SARIF OK: {len(run[\"results\"])} result(s), {len(rule_ids)} rule(s)')
+          "
+          # Endpoint delta wiring: on a pull_request event the action
+          # should have analysed the merge-base, cached endpoints.tsv,
+          # and emitted delta.json. On push / workflow_dispatch the
+          # delta.json still exists (action falls back to empty-baseline
+          # semantics) but with no real merge-base, totals will reflect
+          # the head-only view.
+          DELTA="${{ steps.run.outputs.delta-path }}"
+          test -n "$DELTA"
+          test -f "$DELTA"
+          python3 -c "
+          import json
+          d = json.load(open('$DELTA'))
+          assert d['status'] in ('ok', 'suppressed-asymmetric-zero'), d['status']
+          assert 'totals' in d and set(d['totals']) >= {'baseline', 'head', 'added', 'removed', 'moved', 'unchanged'}
+          for key in ('added', 'removed', 'moved'):
+              assert isinstance(d[key], list), f'{key} should be a list'
+          print(f'delta wiring OK: status={d[\"status\"]} totals={d[\"totals\"]}')
+          # On a pull_request event this PR should produce a non-trivial
+          # delta because this PR adds the bigger fixture / changes wiring.
+          # On push/dispatch (no merge-base) head==baseline by construction.
+          "
+
+      # On a private user-owned repo (no GHAS) this 403s; continue-on-error
+      # keeps the self-test green so the SARIF assertion above is what
+      # actually exercises the SARIF surface. Once the repo is public or
+      # moved under an org with GHAS, this step will populate the
+      # Security tab as a bonus.
+      - name: Upload SARIF to Code Scanning
+        if: always() && steps.run.outputs.sarif-path != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.run.outputs.sarif-path }}
+          category: fastapi-routing-check
 
       - name: Upload analysis artefacts
         if: always()
@@ -54,5 +165,7 @@ jobs:
           name: lisa-network-report
           path: |
             lisa-network-out/report.json
+            lisa-network-out/results.sarif
+            lisa-network-out/delta.json
             lisa-network-out/final-network.pdf
             lisa-network-out/final-network.txt

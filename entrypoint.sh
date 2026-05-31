@@ -53,7 +53,7 @@ if [[ ! -f "$REPORT" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Parse warnings into a structured table
+# 2. Parse warnings into a structured table + a SARIF 2.1.0 file
 #
 # Each warning is a single .message string; severity is bracketed in the
 # first line ("[GENERIC] [HIGH] ..."), and file:line references are
@@ -65,13 +65,23 @@ fi
 #                  repo-relative by stripping the bind-mount prefix
 # The result lands in $OUTPUT_DIR/findings.tsv as
 #   severity \t family \t file \t line \t title
-# which both the annotation emitter and the PR-comment poster consume.
+# which both the annotation emitter and the PR-comment poster consume,
+# AND in $OUTPUT_DIR/results.sarif (SARIF 2.1.0), which any consuming
+# workflow can hand to github/codeql-action/upload-sarif to render
+# findings natively in the PR's Code Scanning tab / Security tab.
+# The SARIF is emitted unconditionally — an empty results array tells
+# GitHub Code Scanning to clear stale findings on the branch.
 # ---------------------------------------------------------------------------
 FINDINGS_TSV="$WORKSPACE/$OUTPUT_DIR/findings.tsv"
+SARIF="$WORKSPACE/$OUTPUT_DIR/results.sarif"
+# GITHUB_ACTION_REF is set by the runner to the ref/tag the action was
+# resolved at (e.g. "v0.1.0"); empty when invoked via `uses: ./` in the
+# self-test workflow or run locally, so fall back to "dev".
+ACTION_VERSION="${GITHUB_ACTION_REF:-dev}"
 
-python3 - "$REPORT" "$FINDINGS_TSV" "${FAMILIES:-all}" <<'PY'
-import json, os, re, sys
-report_path, tsv_path, families_arg = sys.argv[1], sys.argv[2], sys.argv[3]
+python3 - "$REPORT" "$FINDINGS_TSV" "$SARIF" "${FAMILIES:-all}" "$ACTION_VERSION" <<'PY'
+import hashlib, json, os, re, sys, urllib.parse
+report_path, tsv_path, sarif_path, families_arg, tool_version = sys.argv[1:6]
 report = json.load(open(report_path))
 warnings = report.get("warnings") or []
 
@@ -164,13 +174,231 @@ for w in warnings:
     # whitespace IFS chars are treated as a single delimiter).
     fpath = loc.group(1) if loc else "-"
     fline = loc.group(2) if loc else "0"
-    rows.append((sev, fam, fpath, fline, title))
+    # Strip the "[GENERIC] [HIGH] " prefix off the raw message so the SARIF
+    # text body reads cleanly (level is already encoded structurally), and
+    # scrub the analyzer-internal heap[s] identifier wherever it appears
+    # inside the body for the same reason as in the title.
+    body = re.sub(r"^\[[^\]]+\]\s*\[(?:HIGH|MEDIUM)\]\s*", "", msg, count=1)
+    body = INTERNAL_ID_RE.sub("", body)
+    rows.append((sev, fam, fpath, fline, title, body))
 
 with open(tsv_path, "w") as f:
     for r in rows:
-        f.write("\t".join(r) + "\n")
+        # TSV remains 5-column; the body is consumed only by SARIF.
+        f.write("\t".join(r[:5]) + "\n")
+
+# ---------- SARIF 2.1.0 emission -------------------------------------------
+# Rule catalogue: one entry per defect family. defaultConfiguration.level
+# matches the severity assigned by the checker (HIGH→error, MEDIUM→warning);
+# per-result `level` still wins, so a hypothetical HIGH dead-handler would
+# render as error in the Security tab even though dead-handler's default
+# is warning.
+RULES = [
+    {
+        "id": "duplicate-include",
+        "name": "DuplicateInclude",
+        "shortDescription": {"text": "Router included more than once at the same prefix."},
+        "fullDescription": {"text": (
+            "The same APIRouter is mounted via include_router(...) more than once at the "
+            "same prefix. Under FastAPI's first-match dispatch the later mount is dead: "
+            "its routes are appended to the table but never reached, and any extra "
+            "arguments it passes (dependencies, tags, ...) are silently dropped."
+        )},
+        "defaultConfiguration": {"level": "error"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+    {
+        "id": "wrong-handler",
+        "name": "WrongHandler",
+        "shortDescription": {"text": "Route shadowed by an earlier overlapping registration."},
+        "fullDescription": {"text": (
+            "A concrete route is shadowed by an earlier wildcard or overlapping pattern on "
+            "the same router. Requests to the shadowed path are matched first against the "
+            "earlier registration; the intended handler never executes."
+        )},
+        "defaultConfiguration": {"level": "error"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+    {
+        "id": "dead-handler",
+        "name": "DeadHandler",
+        "shortDescription": {"text": "Shadowed handler is otherwise unreferenced — pure dead code."},
+        "fullDescription": {"text": (
+            "Wrong-handler case where the shadowed handler has no other call sites or "
+            "references in the project: the function definition is dead and can be removed "
+            "(or the shadow fixed) without behavioural impact."
+        )},
+        "defaultConfiguration": {"level": "warning"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+    {
+        "id": "duplicate-registration",
+        "name": "DuplicateRegistration",
+        "shortDescription": {"text": "Same (method, path) registered in two different files."},
+        "fullDescription": {"text": (
+            "The same (HTTP method, path) pair is registered from more than one source "
+            "location. Only the first registration in dispatch order wins; the rest are "
+            "redundant and a likely sign of a refactor that left a stale registration."
+        )},
+        "defaultConfiguration": {"level": "warning"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+    {
+        "id": "conditional-registration",
+        "name": "ConditionalRegistration",
+        "shortDescription": {"text": "Same path registered on incomparable if/else branches."},
+        "fullDescription": {"text": (
+            "The same path is registered on branches that the analyzer cannot order: at "
+            "runtime exactly one wins depending on configuration, making the live route "
+            "table depend on environment rather than source. Restructure so only one "
+            "registration is reachable, or move each branch to a distinct path."
+        )},
+        "defaultConfiguration": {"level": "warning"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+    {
+        "id": "routing",
+        "name": "RoutingDefect",
+        "shortDescription": {"text": "Routing defect that does not match any specific family."},
+        "fullDescription": {"text": "Fallback rule for findings the parser could not classify into a specific family."},
+        "defaultConfiguration": {"level": "warning"},
+        "helpUri": "https://github.com/giacomozanatta/fastapi-routing-check#defect-families-detected",
+    },
+]
+
+def sarif_level(sev: str) -> str:
+    # SARIF levels: none | note | warning | error. The action only ever
+    # surfaces HIGH/MEDIUM, so the mapping is total.
+    return "error" if sev.upper() == "HIGH" else "warning"
+
+# Sections whose contents are pre-wrapped prose, not structured location
+# data — these get reflowed into one paragraph. Everything else (e.g.
+# "Include sites:", "Dead endpoint:", "Registration sites:") is kept
+# verbatim inside a fenced code block so the analyzer's intentional
+# layout (file:line locations, (runs)/(dead) tags) survives.
+_PROSE_HEADERS = {"what happens at runtime", "fix"}
+_SECTION_RE = re.compile(r"^(\s*)(\S.*?):\s*$")
+
+def body_to_markdown(body: str) -> str:
+    # LiSA's message bodies are pre-wrapped at ~70 columns for terminal
+    # display: hard newlines inside paragraphs that GHAS's HTML renderer
+    # respects literally, breaking prose into a ragged column. Rebuild
+    # the body as markdown so prose reflows into the alert-detail width
+    # while structured sections keep their fixed layout.
+    lines = body.rstrip().splitlines()
+    out, i, n = [], 0, len(lines)
+    # First non-blank line is the title-restated summary; emit as-is.
+    while i < n and not lines[i].strip():
+        i += 1
+    if i < n:
+        out.append(lines[i].strip())
+        i += 1
+    while i < n:
+        # Skip blank separators between sections.
+        while i < n and not lines[i].strip():
+            i += 1
+        if i >= n:
+            break
+        header_match = _SECTION_RE.match(lines[i])
+        if not header_match:
+            # Loose paragraph not preceded by a "Header:" line — reflow
+            # by collecting until the next blank line.
+            para = []
+            while i < n and lines[i].strip():
+                para.append(lines[i].strip())
+                i += 1
+            out.append("")
+            out.append(" ".join(para))
+            continue
+        header = header_match.group(2).strip()
+        i += 1
+        # Collect the indented content lines for this section.
+        content = []
+        while i < n and lines[i].strip():
+            content.append(lines[i])
+            i += 1
+        out.append("")
+        out.append(f"**{header}**")
+        out.append("")
+        if header.lower() in _PROSE_HEADERS:
+            out.append(" ".join(c.strip() for c in content))
+        else:
+            # Strip the minimum common indent so the code block starts at
+            # column 0 but preserves relative indentation (e.g. the
+            # "    GET /path\n       declared at ...:Line:Col" layout).
+            non_empty = [c for c in content if c.strip()]
+            min_indent = min((len(c) - len(c.lstrip()) for c in non_empty), default=0)
+            out.append("```")
+            for c in content:
+                out.append(c[min_indent:] if len(c) >= min_indent else c)
+            out.append("```")
+    return "\n".join(out).strip() + "\n"
+
+def sarif_result(sev, fam, fpath, fline, title, body):
+    # partialFingerprints lets GitHub Code Scanning dedupe the same defect
+    # across re-runs even when line numbers drift (e.g. unrelated edits
+    # above the finding shift its anchor line). The "primaryLocationLineHash"
+    # key is the conventional GH name; we intentionally exclude the line
+    # number from the input so the fingerprint is stable across reformats.
+    fp_input = f"{fam}|{fpath}|{title}".encode("utf-8")
+    fp = hashlib.sha256(fp_input).hexdigest()
+    result = {
+        "ruleId": fam,
+        "level": sarif_level(sev),
+        # GHAS renders message.markdown when present, falls back to .text.
+        # We keep .text as the raw analyzer body for non-GitHub SARIF
+        # consumers (VS Code SARIF Viewer, sarifweb.azurewebsites.net,
+        # etc.) and provide a reflowed markdown variant for the Code
+        # Scanning alert detail view.
+        "message": {
+            "text": body.strip(),
+            "markdown": body_to_markdown(body),
+        },
+        "partialFingerprints": {"primaryLocationLineHash": fp},
+        "properties": {"severity": sev.lower()},
+    }
+    if fpath != "-" and fpath:
+        # urllib.parse.quote keeps "/" literal so the SARIF URI matches
+        # the on-disk repo path GitHub expects; only exotic chars get %-encoded.
+        result["locations"] = [{
+            "physicalLocation": {
+                "artifactLocation": {"uri": urllib.parse.quote(fpath, safe="/")},
+                "region": {"startLine": int(fline) if fline.isdigit() and int(fline) > 0 else 1},
+            }
+        }]
+    return result
+
+sarif = {
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [{
+        "tool": {
+            "driver": {
+                # Display name shown in the GHAS Code Scanning UI
+                # ("GitHub Advanced Security / LiSA FastAPI Routing
+                # Checker") and in each alert's "Tool" column. Stays
+                # human-readable; the stable slug used for Code Scanning
+                # category / dedup lives in automationDetails.id below.
+                "name": "LiSA FastAPI Routing Checker",
+                "informationUri": "https://github.com/giacomozanatta/fastapi-routing-check",
+                "version": tool_version,
+                "rules": RULES,
+            },
+        },
+        # automationDetails.id becomes the Code Scanning "category" if the
+        # upload-sarif step doesn't set one explicitly — keeps this tool's
+        # results from overwriting findings from other analyzers on the
+        # same ref.
+        "automationDetails": {"id": "fastapi-routing-check"},
+        "results": [sarif_result(*r) for r in rows],
+    }],
+}
+
+with open(sarif_path, "w") as f:
+    json.dump(sarif, f, indent=2)
 
 print(f"parsed {len(rows)} findings -> {tsv_path}")
+print(f"emitted SARIF -> {sarif_path}")
 PY
 
 # Counts.
@@ -184,57 +412,14 @@ ENDPOINTS_TSV="$WORKSPACE/$OUTPUT_DIR/endpoints.tsv"
 if [[ -f "$FINAL_TXT" ]]; then
   endpoints_count=$(grep -Eo 'COUNT[[:space:]]*[:=][[:space:]]*[0-9]+' "$FINAL_TXT" \
     | head -n1 | grep -Eo '[0-9]+' || echo 0)
-  # Parse the per-method endpoint listing out of final-network.txt.
-  # Layout:
-  #   COUNT: N
-  #   GET: K
-  #       /api/v1/items/featured: app/main.py:22:25
-  #       /api/v1/items/{item_id}: app/main.py:22:25
-  #   POST: M
-  #       ...
-  #   (blank line ends the endpoint section; the rest of the file
-  #    holds unrelated UNREACHABLE ROUTES / DUPLICATE include_router
-  #    REGISTRATIONS sections.)
-  # We emit one row per (method, path) into endpoints.tsv with columns
-  #   method \t path \t fpath \t fline
-  # using "-" as the sentinel for "unresolved path" so bash read does
-  # not collapse empty fields under whitespace-only IFS.
-  python3 - "$FINAL_TXT" "$ENDPOINTS_TSV" <<'PY'
-import re, sys
-in_path, out_path = sys.argv[1], sys.argv[2]
-method_re   = re.compile(r"^([A-Z]+):\s*\d+\s*$")
-endpoint_re = re.compile(r"^\s+(\S.+?):\s*(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):\d+\s*$")
-current = None
-rows = []
-seen = set()  # de-dup identical (method, path, file, line) lines
-with open(in_path, encoding="utf-8", errors="replace") as f:
-    for raw in f:
-        line = raw.rstrip("\n")
-        if not line.strip():
-            if current is not None:
-                # blank line after we entered the listing -> end of section
-                break
-            continue
-        m = method_re.match(line)
-        if m:
-            current = m.group(1)
-            continue
-        if current is None:
-            continue
-        em = endpoint_re.match(line)
-        if not em:
-            continue
-        path, fpath, fline = em.group(1).strip(), em.group(2), em.group(3)
-        key = (current, path, fpath, fline)
-        if key in seen:
-            continue
-        seen.add(key)
-        rows.append((current, path, fpath, fline))
-with open(out_path, "w") as f:
-    for r in rows:
-        f.write("\t".join(r) + "\n")
-print(f"parsed {len(rows)} endpoints -> {out_path}", file=sys.stderr)
-PY
+  # Parse the per-method endpoint listing out of final-network.txt into
+  # a 4-column TSV (METHOD \t PATH \t FILE \t LINE). The parser lives in
+  # bin/parse-endpoints.py so the baseline analysis (merge-base, for the
+  # endpoint-delta feature) and the head analysis here share a single
+  # source of truth on what counts as an endpoint row — any drift between
+  # the two would otherwise surface as fake "added"/"removed" rows in the
+  # delta.
+  python3 "${ACTION_PATH}/bin/parse-endpoints.py" "$FINAL_TXT" "$ENDPOINTS_TSV"
 fi
 
 {
@@ -242,6 +427,7 @@ fi
   echo "findings-count=$findings_count"
   echo "high-severity-count=$high_count"
   echo "report-path=$OUTPUT_DIR/report.json"
+  echo "sarif-path=$OUTPUT_DIR/results.sarif"
 } >> "$GITHUB_OUTPUT"
 
 # ---------------------------------------------------------------------------

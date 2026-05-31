@@ -1,9 +1,12 @@
-"""Two parallel routers for the messages API.
+"""Two parallel routers for the v2 messages API.
 
-v2_router and v1_compat_router both expose POST /messages, bound to
-different handlers. app/main.py mounts them under distinct prefixes
-(/api/v2 and /api/v1 respectively), so each fully-qualified path maps
-to exactly one handler.
+Seeds: conditional-registration (MEDIUM) — v2_router and v1_compat_router
+both expose POST /messages, bound to different handlers. The conditional
+in app/main.py mounts ONE of them under /api/v2 based on a runtime
+feature flag, so POST /api/v2/messages dispatches to a different function
+in different deployments. Crucially, these routers are mounted ONLY
+inside the if/else (nowhere unconditionally) — that is what makes the
+checker classify it as conditional rather than duplicate registration.
 """
 from fastapi import APIRouter
 
@@ -21,8 +24,7 @@ def post_message_v2(text: str):
 def post_message_v1_compat(text: str):
     """Post a v1-compatible message.
 
-    Mounted under /api/v1 (distinct from v2's /api/v2 prefix). The
-    payload contract differs from v2's: v1 returns a flat envelope,
-    v2 returns a structured one.
+    Deployed when ENABLE_V2_API is unset/false. The route path is
+    identical to v2's, but the payload contract differs.
     """
     return {"sent": text, "version": "v1-compat"}

@@ -33,8 +33,9 @@ A complete sample workflow is in
 | `severity-threshold` | no | `high` | `high` ignores medium findings for gating; `medium` fails on any finding. |
 | `families` | no | `all` | Comma-separated list of finding families to surface. Findings in any other family are dropped before counts, annotations, comment, and the gate. Valid values: `duplicate-include`, `wrong-handler`, `dead-handler`, `duplicate-registration`, `conditional-registration`. Use `all` (or leave empty) to include every family. |
 | `jvm-heap` | no | `4g` | `-Xmx` for the analyzer JVM. |
-| `annotations` | no | `true` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. |
+| `annotations` | no | `false` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. Default off because uploading SARIF (see `sarif-path`) gives the same surface via GHAS Code Scanning; enabling both renders each finding twice on the same line. Turn back on when you do not upload SARIF (e.g. a private repo without GHAS). |
 | `comment-on-pr` | no | `true` | Post (and update in place on reruns) a sticky PR-level comment with file:line links. Requires `pull-requests: write`. |
+| `endpoint-delta` | no | `true` | On `pull_request` events, also analyse the PR's merge-base and diff its endpoint inventory against the head's; emits `delta.json` (added / removed / moved endpoints). Doubles analysis time on cache miss, mitigated by `actions/cache` keyed on the merge-base SHA + analyzer hash. Set to `false` to skip the baseline analysis entirely. |
 
 ## Outputs
 
@@ -44,10 +45,15 @@ A complete sample workflow is in
 | `findings-count` | Total routing-checker findings. |
 | `high-severity-count` | Findings at severity `high`. |
 | `report-path` | Path to `report.json`. |
+| `sarif-path` | Path to `results.sarif` (SARIF 2.1.0). Pipe into `github/codeql-action/upload-sarif@v3` to render findings in the PR's Code Scanning / Security tab. Emitted unconditionally (empty results array clears stale findings on the branch). |
+| `delta-path` | Path to `delta.json` — endpoint-level diff between the PR's merge-base and HEAD. Schema: `{status, totals: {baseline, head, added, removed, moved, unchanged}, added: […], removed: […], moved: […]}`. Empty `added`/`removed`/`moved` arrays on non-PR events. |
+| `endpoints-added` | Number of `(method, path)` pairs in HEAD but not in the merge-base. |
+| `endpoints-removed` | Number of `(method, path)` pairs in the merge-base but not in HEAD. |
+| `endpoints-moved` | Number of `(method, path)` pairs in both whose registration sites (file:line) changed — captures refactors *and* duplicate-include defects being fixed or introduced. |
 
 ## What gets surfaced in the PR
 
-The action emits findings through **three** GitHub surfaces in
+The action emits findings through **four** GitHub surfaces in
 parallel, so the same finding is visible whichever tab the reviewer
 opens:
 
@@ -72,14 +78,43 @@ opens:
    the diff.  GitHub silently truncates these after 10 per
    severity per workflow run, so they are best-effort; the sticky
    comment is authoritative.
+
+   **Off by default.**  When you upload SARIF (surface #4), GHAS
+   Code Scanning already renders inline annotations on the same
+   lines — emitting our own would duplicate them.  Set
+   `annotations: 'true'` to turn them back on when you do not
+   upload SARIF (e.g. a private repo without GHAS).
 3. **Job summary (Actions run page).**  The same table as the
    sticky comment, rendered at the top of the workflow run for
    maintainers reviewing the run itself.
+4. **Code Scanning alerts (Security tab).**  The action always emits
+   a SARIF 2.1.0 file at `${{ steps.check.outputs.sarif-path }}`.
+   Pipe it into `github/codeql-action/upload-sarif@v3` (see
+   [`examples/routing-check.yml`](examples/routing-check.yml)) and
+   findings render natively in the PR's *Code Scanning* check and the
+   repo's *Security → Code scanning alerts* view, with stable
+   fingerprints so the same defect is not reported twice across
+   re-runs.
 
-In addition, the full `report.json`, `final-network.pdf`, and
-`final-network.txt` are uploaded as workflow artefacts so reviewers
-can download the full topology and the routing checker's structured
-output.
+   **GitHub Advanced Security requirement.**  Code Scanning is free
+   on **public** repositories — the upload works out of the box.  On
+   **private** repositories it requires GitHub Advanced Security
+   (GHAS), which is only available on Enterprise plans for
+   organisations.  Without GHAS the `upload-sarif` step returns a
+   403; the example workflow uses `continue-on-error: true` so the
+   job stays green, and reviewers fall back to:
+   - the **sticky PR comment** + **inline annotations** (surfaces 1
+     and 2 above) — both work in any repo without extra entitlements;
+   - the **`results.sarif` artefact** uploaded with the rest of the
+     analysis bundle — view it locally with Microsoft's
+     [SARIF Viewer](https://marketplace.visualstudio.com/items?itemName=MS-SarifVSCode.sarif-viewer)
+     VS Code extension or with the web viewer at
+     [sarifweb.azurewebsites.net](https://sarifweb.azurewebsites.net/).
+
+In addition, the full `report.json`, `results.sarif`,
+`final-network.pdf`, and `final-network.txt` are uploaded as
+workflow artefacts so reviewers can download the full topology and
+the routing checker's structured output.
 
 ## Defect families detected
 
