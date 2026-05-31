@@ -198,31 +198,27 @@ fi
   echo "| Findings (medium) | $medium_count |"
   echo
   if (( findings_count > 0 )); then
-    # Show the leading "NEW" column only when at least one finding is
-    # actually NEW vs the baseline — otherwise the column is dead weight.
-    # Summary uses <kbd>NEW</kbd> (low-key, matches the Δ column in the
-    # endpoint-delta table); the sticky PR comment uses a shields.io
-    # badge for higher visibility.
-    if (( new_count > 0 )); then
-      echo "| Δ | Severity | Family | Where | What |"
-      echo "|---|---|---|---|---|"
-    else
-      echo "| Severity | Family | Where | What |"
-      echo "|---|---|---|---|"
-    fi
+    # Badge sits inline with severity (no extra Δ column). Sort flips
+    # NEW rows to the top so reviewers see "what did this PR add?"
+    # without scanning: -s (stable, preserves the analyzer's
+    # severity ordering within each group) + -r (reverse, so "NEW"
+    # sorts before the empty string in column 1).
+    echo "| Severity | Family | Where | What |"
+    echo "|---|---|---|---|"
+    sort -t $'\t' -k1,1 -s -r "$FINDINGS_TSV" | \
     while IFS=$'\t' read -r is_new sev fam fpath fline title; do
       if [[ "$fpath" == "-" || -z "$fpath" ]]; then
         where="(unresolved)"
       else
         where="\`$fpath:$fline\`"
       fi
-      if (( new_count > 0 )); then
-        badge=""; [[ "$is_new" == "NEW" ]] && badge="<kbd>NEW</kbd>"
-        echo "| $badge | $sev | $fam | $where | $title |"
-      else
-        echo "| $sev | $fam | $where | $title |"
-      fi
-    done < "$FINDINGS_TSV"
+      sev_cell="$sev"
+      # for-the-badge style is the chunky high-visibility variant —
+      # large enough that NEW findings jump off the page without the
+      # reader hunting for a tiny chip.
+      [[ "$is_new" == "NEW" ]] && sev_cell="$sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=for-the-badge)"
+      echo "| $sev_cell | $fam | $where | $title |"
+    done
   fi
 
   # Endpoint delta section — emitted only when the renderer produced
@@ -315,17 +311,13 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
         (( new_count > 0 )) && new_label=" &mdash; **$new_count NEW in this PR**"
         echo "**Found $findings_count finding(s)** &mdash; $high_count high, $medium_count medium${new_label} &mdash; across **$endpoints_count** recovered endpoints."
         echo
-        # Add the leading Δ column with a shields.io NEW badge only when
-        # at least one finding is new — otherwise the column adds noise.
-        # shields.io renders a colored chip that visually pops against
-        # the surrounding text; the colour matches GitHub's "bug" label.
-        if (( new_count > 0 )); then
-          echo "| Δ | Severity | Family | Where | What |"
-          echo "|---|---|---|---|---|"
-        else
-          echo "| Severity | Family | Where | What |"
-          echo "|---|---|---|---|"
-        fi
+        echo "| Severity | Family | Where | What |"
+        echo "|---|---|---|---|"
+        # Sort flips NEW rows to the top so reviewers see "what did
+        # this PR add?" without scanning. -s preserves the analyzer's
+        # severity ordering within each group; -r puts "NEW" before
+        # the empty string in column 1.
+        sort -t $'\t' -k1,1 -s -r "$FINDINGS_TSV" | \
         while IFS=$'\t' read -r is_new sev fam fpath fline title; do
           if [[ "$fpath" == "-" || -z "$fpath" ]]; then
             where="(unresolved)"
@@ -336,14 +328,12 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           esc_title=$(printf '%s' "$title" | sed 's/|/\\|/g')
           sev_lc=$(printf '%s' "$sev" | tr '[:upper:]' '[:lower:]')
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
-          if (( new_count > 0 )); then
-            badge=""
-            [[ "$is_new" == "NEW" ]] && badge="![NEW](https://img.shields.io/badge/NEW-d73a4a?style=flat-square)"
-            echo "| $badge | $icon $sev | $fam | $where | $esc_title |"
-          else
-            echo "| $icon $sev | $fam | $where | $esc_title |"
-          fi
-        done < "$FINDINGS_TSV"
+          sev_cell="$icon $sev"
+          # for-the-badge style is the chunky high-visibility variant
+          # so NEW findings genuinely stand out at a glance.
+          [[ "$is_new" == "NEW" ]] && sev_cell="$icon $sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=for-the-badge)"
+          echo "| $sev_cell | $fam | $where | $esc_title |"
+        done
       fi
 
       # Endpoint delta — emit only when the renderer produced output,
