@@ -1,0 +1,59 @@
+# Drop this file at .github/workflows/routing-check.yml inside your
+# FastAPI repo. Adjust `main-file` to your real entrypoint.
+name: FastAPI routing check
+
+on:
+  pull_request:
+    paths:
+      - '**.py'
+      - '.github/workflows/routing-check.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read         # required if the analyzer image is in a private GHCR repo
+  pull-requests: write   # required to post / update the sticky PR comment
+  checks: write          # reserved for the optional Checks API mode
+
+jobs:
+  routing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR (only needed if the image is private)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run FastAPI routing check
+        id: check
+        uses: <your-owner>/fastapi-routing-check@v0.1.0
+        with:
+          main-file: app/main.py
+          fail-on-finding: 'true'
+          severity-threshold: high
+          annotations: 'true'        # inline annotations on the Files Changed tab
+          comment-on-pr: 'true'      # sticky PR comment with file:line links
+          # Optional — override if you publish your own analyzer image:
+          # analyzer-image: ghcr.io/<your-owner>/lisa-network:v0.1.0
+
+      - name: Upload analysis artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisa-network-report
+          path: |
+            lisa-network-out/report.json
+            lisa-network-out/final-network.html
+            lisa-network-out/final-network.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Endpoints recovered : ${{ steps.check.outputs.endpoints-count }}"
+          echo "Findings (total)    : ${{ steps.check.outputs.findings-count }}"
+          echo "Findings (high)     : ${{ steps.check.outputs.high-severity-count }}"

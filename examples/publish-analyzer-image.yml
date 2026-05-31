@@ -1,0 +1,57 @@
+# Drop this file at .github/workflows/publish-image.yml inside the
+# lisa-network repo. It builds the analyzer container and pushes it to
+# ghcr.io/<owner>/lisa-network:{latest,<sha>,<release-tag>}.
+#
+# Prerequisite: a publishable Dockerfile that bakes the four sibling
+# repos (lisa, pylisa, jlisa, lisa-network) into the image instead of
+# requiring a bind mount. A starter is at docker/Dockerfile.publish (see
+# README of fastapi-routing-check).
+name: Publish analyzer image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The publishable Dockerfile clones the sibling repos itself, so we
+      # do not need extra checkouts here. If you prefer to use the local
+      # bind-mount Dockerfile, switch to a matrix of `actions/checkout`s
+      # with `repository:` and `path:` to land lisa/, pylisa/, jlisa/
+      # alongside the build context.
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/lisa-network
+          tags: |
+            type=ref,event=tag
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.publish
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

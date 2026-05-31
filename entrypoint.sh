@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# fastapi-routing-check action entrypoint.
+#
+# Required env (set by action.yml):
+#   MAIN_FILE              entrypoint path, relative to repo root
+#   PROJECT_DIR            project root passed to the analyzer
+#   OUTPUT_DIR             where final-network.* and report.json land
+#   FAIL_ON_FINDING        "true" | "false"
+#   SEVERITY_THRESHOLD     "high" | "medium"
+#   ANALYZER_IMAGE         container image tag of the analyzer
+#   JVM_HEAP               max heap (e.g. 4g)
+#   COMMENT_ON_PR          "true" | "false" — post a sticky PR comment
+#   ANNOTATIONS            "true" | "false" — emit ::warning:: annotations
+#   GITHUB_TOKEN           used by `gh` to post/update the PR comment
+
+set -euo pipefail
+
+WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
+mkdir -p "$WORKSPACE/$OUTPUT_DIR"
+
+# ---------------------------------------------------------------------------
+# 1. Run the analyzer
+# ---------------------------------------------------------------------------
+docker run --rm \
+  -v "$WORKSPACE":/workspace \
+  -w /workspace \
+  -e JAVA_TOOL_OPTIONS="-Xmx${JVM_HEAP}" \
+  --entrypoint /opt/lisa-network/bin/lisa-network \
+  "$ANALYZER_IMAGE" \
+  --main-file   "$MAIN_FILE" \
+  --project-dir "$PROJECT_DIR" \
+  --output-dir  "$OUTPUT_DIR" \
+  --no-cfg-dump
+
+REPORT="$WORKSPACE/$OUTPUT_DIR/report.json"
+FINAL_TXT="$WORKSPACE/$OUTPUT_DIR/final-network.txt"
+
+if [[ ! -f "$REPORT" ]]; then
+  echo "::error::report.json not produced at $REPORT — analyzer likely failed before checker stage."
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Parse warnings into a structured table
+#
+# Each warning is a single .message string; severity is bracketed in the
+# first line ("[GENERIC] [HIGH] ..."), and file:line references are
+# embedded inline. We extract:
+#   - severity   ← [HIGH] / [MEDIUM] in the header
+#   - title      ← rest of the header line
+#   - family     ← derived from title keywords
+#   - file:line  ← first absolute path:line:col after "/workspace/", made
+#                  repo-relative by stripping the bind-mount prefix
+# The result lands in $OUTPUT_DIR/findings.tsv as
+#   severity \t family \t file \t line \t title
+# which both the annotation emitter and the PR-comment poster consume.
+# ---------------------------------------------------------------------------
+FINDINGS_TSV="$WORKSPACE/$OUTPUT_DIR/findings.tsv"
+
+python3 - "$REPORT" "$FINDINGS_TSV" <<'PY'
+import json, re, sys
+report_path, tsv_path = sys.argv[1], sys.argv[2]
+report = json.load(open(report_path))
+warnings = report.get("warnings") or []
+
+SEV_RE   = re.compile(r"^\[[^\]]+\]\s*\[(HIGH|MEDIUM)\]\s*(.+)$", re.MULTILINE)
+# Two LOC patterns: the canonical "/workspace/<path>.py:line:col" used in
+# message bodies, AND the duplicate-include variant where the path is
+# embedded inside single quotes: "@'/workspace/<path>.py':line:col".
+# The "/workspace/" prefix is optional: messages may carry absolute
+# paths (real CI bind-mount) OR repo-relative paths (when invoked with
+# --project-dir .). Either way the captured path is what we want to
+# render — repo-relative.
+LOC_RE       = re.compile(r"(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):(\d+)")
+LOC_QUOTED   = re.compile(r"'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
+FAMILY_KEYS = [
+    ("wrong handler",            "wrong-handler"),
+    ("duplicate include",        "duplicate-include"),
+    ("handler is dead code",     "dead-handler"),
+    ("dead handler",             "dead-handler"),
+    ("duplicate registration",   "duplicate-registration"),
+    ("conditional registration", "conditional-registration"),
+]
+# Strip the LiSA-internal allocation-site identifier that appears in
+# duplicate-include titles (e.g.
+#   "router heap[s]:pp@'/workspace/foo.py':19:0 is included 2 times")
+# so the rendered title reads as developer-facing prose.
+INTERNAL_ID_RE = re.compile(r"\s*heap\[s\]:pp@'[^']+':\d+:\d+")
+
+def family_of(title: str) -> str:
+    t = title.lower()
+    for needle, label in FAMILY_KEYS:
+        if needle in t:
+            return label
+    return "routing"
+
+rows = []
+for w in warnings:
+    msg = w.get("message", "")
+    m = SEV_RE.search(msg)
+    if not m:
+        continue
+    sev, title = m.group(1), m.group(2).strip()
+    fam = family_of(title)
+    title = INTERNAL_ID_RE.sub("", title).strip()
+    loc = LOC_RE.search(msg) or LOC_QUOTED.search(msg)
+    # Use "-" as a sentinel for "unresolved" so bash `read` with IFS=$'\t'
+    # does not collapse the empty field (tab is whitespace; consecutive
+    # whitespace IFS chars are treated as a single delimiter).
+    fpath = loc.group(1) if loc else "-"
+    fline = loc.group(2) if loc else "0"
+    rows.append((sev, fam, fpath, fline, title))
+
+with open(tsv_path, "w") as f:
+    for r in rows:
+        f.write("\t".join(r) + "\n")
+
+print(f"parsed {len(rows)} findings -> {tsv_path}")
+PY
+
+# Counts.
+findings_count=$(wc -l < "$FINDINGS_TSV" | tr -d ' ')
+high_count=$(awk -F'\t' 'tolower($1)=="high"' "$FINDINGS_TSV" | wc -l | tr -d ' ')
+medium_count=$(awk -F'\t' 'tolower($1)=="medium"' "$FINDINGS_TSV" | wc -l | tr -d ' ')
+
+endpoints_count="0"
+if [[ -f "$FINAL_TXT" ]]; then
+  endpoints_count=$(grep -Eo 'COUNT[[:space:]]*[:=][[:space:]]*[0-9]+' "$FINAL_TXT" \
+    | head -n1 | grep -Eo '[0-9]+' || echo 0)
+fi
+
+{
+  echo "endpoints-count=$endpoints_count"
+  echo "findings-count=$findings_count"
+  echo "high-severity-count=$high_count"
+  echo "report-path=$OUTPUT_DIR/report.json"
+} >> "$GITHUB_OUTPUT"
+
+# ---------------------------------------------------------------------------
+# 3. Job summary (always — visible at the top of the Actions run page)
+# ---------------------------------------------------------------------------
+{
+  echo "## FastAPI routing check"
+  echo
+  echo "| Metric | Value |"
+  echo "|---|---:|"
+  echo "| Endpoints recovered | $endpoints_count |"
+  echo "| Findings (total) | $findings_count |"
+  echo "| Findings (high) | $high_count |"
+  echo "| Findings (medium) | $medium_count |"
+  echo
+  if (( findings_count > 0 )); then
+    echo "| Severity | Family | Where | What |"
+    echo "|---|---|---|---|"
+    while IFS=$'\t' read -r sev fam fpath fline title; do
+      if [[ "$fpath" == "-" || -z "$fpath" ]]; then
+        where="(unresolved)"
+      else
+        where="\`$fpath:$fline\`"
+      fi
+      echo "| $sev | $fam | $where | $title |"
+    done < "$FINDINGS_TSV"
+  fi
+} >> "$GITHUB_STEP_SUMMARY"
+
+# ---------------------------------------------------------------------------
+# 4. Inline annotations on the Files Changed tab
+#
+# These are the lightweight, no-permission-needed surface — they DO render
+# next to the offending line in the diff view, but GitHub silently truncates
+# after 10 per type per run, so they are best-effort.
+# ---------------------------------------------------------------------------
+if [[ "${ANNOTATIONS:-true}" == "true" && "$findings_count" -gt 0 ]]; then
+  while IFS=$'\t' read -r sev fam fpath fline title; do
+    [[ "$fpath" == "-" || -z "$fpath" ]] && continue
+    sev_lc=$(printf '%s' "$sev" | tr '[:upper:]' '[:lower:]')
+    level="warning"; [[ "$sev_lc" == "high" ]] && level="error"
+    # Escape % \n \r for workflow commands.
+    safe="$(printf '%s' "[$sev $fam] $title" | sed -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')"
+    echo "::${level} file=${fpath},line=${fline}::${safe}"
+  done < "$FINDINGS_TSV"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Sticky PR comment — the real "comment on the PR that points at the
+#    file" surface. Re-runs edit the existing comment in place via a
+#    sentinel HTML marker (<!-- fastapi-routing-check -->) so the PR
+#    timeline never accumulates duplicates.
+# ---------------------------------------------------------------------------
+if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "::warning::gh CLI not available in this runner; skipping PR comment."
+  else
+    PR_NUMBER="${GITHUB_REF##*/}"; PR_NUMBER="${PR_NUMBER%/merge}"
+    REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+    SHA="${GITHUB_SHA}"  # commit being analysed — file links pin to it
+    MARKER="<!-- fastapi-routing-check -->"
+
+    BODY_FILE="$WORKSPACE/$OUTPUT_DIR/pr-comment.md"
+    {
+      echo "$MARKER"
+      echo "### FastAPI routing check"
+      echo
+      if (( findings_count == 0 )); then
+        echo ":white_check_mark: No routing defects detected across **$endpoints_count** recovered endpoints."
+      else
+        echo "**Found $findings_count finding(s)** — $high_count high, $medium_count medium — across **$endpoints_count** recovered endpoints."
+        echo
+        echo "| Severity | Family | Where | What |"
+        echo "|---|---|---|---|"
+        while IFS=$'\t' read -r sev fam fpath fline title; do
+          if [[ "$fpath" == "-" || -z "$fpath" ]]; then
+            where="(unresolved)"
+          else
+            where="[\`$fpath:$fline\`]($REPO_URL/blob/$SHA/$fpath#L$fline)"
+          fi
+          # Pipe-escape the title so it doesn't break the markdown table.
+          esc_title=$(printf '%s' "$title" | sed 's/|/\\|/g')
+          sev_lc=$(printf '%s' "$sev" | tr '[:upper:]' '[:lower:]')
+          icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
+          echo "| $icon $sev | $fam | $where | $esc_title |"
+        done < "$FINDINGS_TSV"
+        echo
+        echo "<details><summary>Full report (collapsed)</summary>"
+        echo
+        echo "Download \`lisa-network-report\` from this run's artefacts for the complete \`report.json\`, \`final-network.html\`, and \`final-network.txt\`."
+        echo
+        echo "</details>"
+      fi
+      echo
+      echo "_Run: $REPO_URL/actions/runs/${GITHUB_RUN_ID} • commit \`${SHA:0:7}\`_"
+    } > "$BODY_FILE"
+
+    # Find an existing sticky comment (by sentinel) and edit it; otherwise create one.
+    existing_id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+      --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" \
+      | head -n1 || true)
+
+    if [[ -n "$existing_id" ]]; then
+      gh api --method PATCH \
+        "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" \
+        -f body="$(cat "$BODY_FILE")" >/dev/null
+      echo "Updated sticky PR comment (id=$existing_id)."
+    else
+      gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+        --body-file "$BODY_FILE" >/dev/null
+      echo "Posted sticky PR comment."
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Gate
+# ---------------------------------------------------------------------------
+if [[ "$FAIL_ON_FINDING" != "true" ]]; then
+  echo "fail-on-finding=false; not gating job."
+  exit 0
+fi
+
+case "$SEVERITY_THRESHOLD" in
+  high)
+    if (( high_count > 0 )); then
+      echo "::error::$high_count high-severity routing finding(s) — failing job."
+      exit 1
+    fi
+    ;;
+  medium|*)
+    if (( findings_count > 0 )); then
+      echo "::error::$findings_count routing finding(s) at severity >= medium — failing job."
+      exit 1
+    fi
+    ;;
+esac
+
+echo "No findings at or above severity '$SEVERITY_THRESHOLD'."

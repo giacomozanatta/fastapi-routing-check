@@ -1,0 +1,43 @@
+# Sanity-check the action against a tiny in-tree FastAPI fixture.
+# Run this in the action repo itself before tagging a release.
+name: Self-test
+
+on:
+  pull_request:
+    paths:
+      - 'action.yml'
+      - 'entrypoint.sh'
+      - '.github/workflows/self-test.yml'
+      - 'test/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run action against test/fixture
+        id: run
+        uses: ./
+        with:
+          main-file: test/fixture/app/main.py
+          project-dir: test/fixture
+          fail-on-finding: 'false'   # we want the action to succeed; we just check outputs
+
+      - name: Verify outputs
+        run: |
+          test "${{ steps.run.outputs.endpoints-count }}" != ""
+          test "${{ steps.run.outputs.findings-count }}" != ""
+          test -f "${{ steps.run.outputs.report-path }}"

@@ -1,0 +1,82 @@
+name: 'FastAPI Routing Check'
+description: 'Statically detect silent routing defects in FastAPI applications (duplicate-include, route shadowing, conditional registration) via lisa-network abstract interpretation.'
+author: 'Anonymous'
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
+
+inputs:
+  main-file:
+    description: 'Path (relative to the repo root) of the FastAPI entrypoint, e.g. app/main.py.'
+    required: true
+  project-dir:
+    description: 'Project root passed to the analyzer (used as import-resolution base). Defaults to the workspace root.'
+    required: false
+    default: '.'
+  output-dir:
+    description: 'Directory where final-network.{txt,html,pdf} and report.json are written.'
+    required: false
+    default: 'lisa-network-out'
+  fail-on-finding:
+    description: 'Fail the job when the routing checker reports one or more findings.'
+    required: false
+    default: 'true'
+  severity-threshold:
+    description: 'Only fail on findings at or above this severity (high | medium). With "high", medium-severity findings are surfaced as annotations but do not fail the job.'
+    required: false
+    default: 'high'
+  analyzer-image:
+    description: 'Container image tag of the analyzer to use. Pin to a release tag (e.g. v0.1.0) in production workflows.'
+    required: false
+    default: 'ghcr.io/anonymous/lisa-network:latest'
+  jvm-heap:
+    description: 'Max JVM heap for the analyzer (passed as -Xmx). Default 4g matches the per-run budget used in the empirical study.'
+    required: false
+    default: '4g'
+  annotations:
+    description: 'Emit ::warning file=,line=:: workflow commands so findings appear as inline annotations on the Files Changed tab of the PR. Capped by GitHub at 10 per severity per run.'
+    required: false
+    default: 'true'
+  comment-on-pr:
+    description: 'Post (or update) a sticky comment on the PR with a markdown table linking each finding to file:line on the analysed commit. Requires GITHUB_TOKEN with pull-requests:write.'
+    required: false
+    default: 'true'
+
+outputs:
+  endpoints-count:
+    description: 'Number of HTTP endpoints recovered by the analyzer.'
+    value: ${{ steps.run.outputs.endpoints-count }}
+  findings-count:
+    description: 'Total number of routing-checker findings emitted.'
+    value: ${{ steps.run.outputs.findings-count }}
+  high-severity-count:
+    description: 'Number of high-severity routing-checker findings (wrong-handler, duplicate-include).'
+    value: ${{ steps.run.outputs.high-severity-count }}
+  report-path:
+    description: 'Path to the report.json file containing all findings.'
+    value: ${{ steps.run.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Pull analyzer image
+      shell: bash
+      run: |
+        docker pull "${{ inputs.analyzer-image }}"
+
+    - name: Run lisa-network
+      id: run
+      shell: bash
+      env:
+        MAIN_FILE: ${{ inputs.main-file }}
+        PROJECT_DIR: ${{ inputs.project-dir }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        FAIL_ON_FINDING: ${{ inputs.fail-on-finding }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        ANALYZER_IMAGE: ${{ inputs.analyzer-image }}
+        JVM_HEAP: ${{ inputs.jvm-heap }}
+        ANNOTATIONS: ${{ inputs.annotations }}
+        COMMENT_ON_PR: ${{ inputs.comment-on-pr }}
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ github.token }}
+      run: bash "${ACTION_PATH}/entrypoint.sh"

@@ -1,0 +1,18 @@
+# Action output artefacts that the workflows produce at runtime
+lisa-network-out/
+analysis-out/
+*.tsv
+
+# Local test-driver scratch (the /tmp/try-action dry-run, in case it ever
+# gets symlinked into the repo)
+.try-action/
+
+# Python bytecode in the test fixture
+__pycache__/
+*.py[cod]
+
+# macOS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
