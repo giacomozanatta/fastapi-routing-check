@@ -42,3 +42,14 @@ jobs:
           # is broken even though the run succeeded).
           test "${{ steps.run.outputs.findings-count }}" -ge 1
           test -f "${{ steps.run.outputs.report-path }}"
+          test -f lisa-network-out/final-network.pdf
+
+      - name: Upload analysis artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisa-network-report
+          path: |
+            lisa-network-out/report.json
+            lisa-network-out/final-network.pdf
+            lisa-network-out/final-network.txt

@@ -76,7 +76,7 @@ opens:
    sticky comment, rendered at the top of the workflow run for
    maintainers reviewing the run itself.
 
-In addition, the full `report.json`, `final-network.html`, and
+In addition, the full `report.json`, `final-network.pdf`, and
 `final-network.txt` are uploaded as workflow artefacts so reviewers
 can download the full topology and the routing checker's structured
 output.

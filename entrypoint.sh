@@ -290,7 +290,7 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
         echo
         echo "<details><summary>Full report (collapsed)</summary>"
         echo
-        echo "Download \`lisa-network-report\` from this run's artefacts for the complete \`report.json\`, \`final-network.html\`, and \`final-network.txt\`."
+        echo "Download \`lisa-network-report\` from this run's artefacts for the complete \`report.json\`, \`final-network.pdf\`, and \`final-network.txt\`."
         echo
         echo "</details>"
       fi
