@@ -203,7 +203,18 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
   if ! command -v gh >/dev/null 2>&1; then
     echo "::warning::gh CLI not available in this runner; skipping PR comment."
   else
-    PR_NUMBER="${GITHUB_REF##*/}"; PR_NUMBER="${PR_NUMBER%/merge}"
+    # Pull the PR number from the event payload — robust across PR
+    # event subtypes (opened/synchronize/reopened) and unaffected by
+    # GITHUB_REF's "refs/pull/N/merge" shape that an earlier version of
+    # this script tried (and failed) to parse.
+    PR_NUMBER=""
+    if [[ -n "${GITHUB_EVENT_PATH:-}" && -f "$GITHUB_EVENT_PATH" ]]; then
+      PR_NUMBER=$(jq -r '.pull_request.number // .number // empty' "$GITHUB_EVENT_PATH")
+    fi
+    if [[ -z "$PR_NUMBER" || ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+      echo "::warning::Could not resolve PR number from event payload; skipping PR comment."
+      PR_NUMBER=""
+    fi
     REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
     SHA="${GITHUB_SHA}"  # commit being analysed — file links pin to it
     MARKER="<!-- fastapi-routing-check -->"
