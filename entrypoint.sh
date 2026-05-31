@@ -7,30 +7,42 @@
 #   OUTPUT_DIR             where final-network.* and report.json land
 #   FAIL_ON_FINDING        "true" | "false"
 #   SEVERITY_THRESHOLD     "high" | "medium"
-#   ANALYZER_IMAGE         container image tag of the analyzer
 #   JVM_HEAP               max heap (e.g. 4g)
 #   COMMENT_ON_PR          "true" | "false" — post a sticky PR comment
 #   ANNOTATIONS            "true" | "false" — emit ::warning:: annotations
-#   GITHUB_TOKEN           used by `gh` to post/update the PR comment
+#   ACTION_PATH            absolute path to this action's checkout
+#                          (provided by GitHub as ${{ github.action_path }});
+#                          ${ACTION_PATH}/dist/lisa-network/ is the bundled
+#                          analyzer distribution committed to the action repo
+#   GH_TOKEN               used by `gh` to post/update the PR comment
 
 set -euo pipefail
 
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 mkdir -p "$WORKSPACE/$OUTPUT_DIR"
 
+ANALYZER="${ACTION_PATH}/dist/lisa-network/bin/lisa-network"
+if [[ ! -x "$ANALYZER" ]]; then
+  echo "::error::Bundled analyzer not found or not executable at $ANALYZER. The action repo may be missing dist/lisa-network/."
+  exit 3
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Run the analyzer
+#
+# The analyzer resolves --main-file relative to the current working
+# directory, so we cd into the user's repo root first. JAVA_TOOL_OPTIONS
+# forwards the heap setting without touching the launcher script.
 # ---------------------------------------------------------------------------
-docker run --rm \
-  -v "$WORKSPACE":/workspace \
-  -w /workspace \
-  -e JAVA_TOOL_OPTIONS="-Xmx${JVM_HEAP}" \
-  --entrypoint /opt/lisa-network/bin/lisa-network \
-  "$ANALYZER_IMAGE" \
-  --main-file   "$MAIN_FILE" \
-  --project-dir "$PROJECT_DIR" \
-  --output-dir  "$OUTPUT_DIR" \
-  --no-cfg-dump
+(
+  cd "$WORKSPACE"
+  JAVA_TOOL_OPTIONS="-Xmx${JVM_HEAP}" \
+  "$ANALYZER" \
+    --main-file   "$MAIN_FILE" \
+    --project-dir "$PROJECT_DIR" \
+    --output-dir  "$OUTPUT_DIR" \
+    --no-cfg-dump
+)
 
 REPORT="$WORKSPACE/$OUTPUT_DIR/report.json"
 FINAL_TXT="$WORKSPACE/$OUTPUT_DIR/final-network.txt"
@@ -199,12 +211,16 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
     BODY_FILE="$WORKSPACE/$OUTPUT_DIR/pr-comment.md"
     {
       echo "$MARKER"
-      echo "### FastAPI routing check"
+      echo "<table><tr>"
+      echo "<td><img src=\"https://raw.githubusercontent.com/lisa-analyzer/lisa/main/.github/lisa-logo.png\" width=\"64\" alt=\"Lisa\"></td>"
+      echo "<td><h3>Lisa &mdash; FastAPI routing check</h3>"
+      echo "<sub>Static analysis by <a href=\"https://github.com/lisa-analyzer/lisa\">LiSA</a> via <a href=\"https://github.com/giacomozanatta/fastapi-routing-check\">fastapi-routing-check</a></sub></td>"
+      echo "</tr></table>"
       echo
       if (( findings_count == 0 )); then
         echo ":white_check_mark: No routing defects detected across **$endpoints_count** recovered endpoints."
       else
-        echo "**Found $findings_count finding(s)** — $high_count high, $medium_count medium — across **$endpoints_count** recovered endpoints."
+        echo "**Found $findings_count finding(s)** &mdash; $high_count high, $medium_count medium &mdash; across **$endpoints_count** recovered endpoints."
         echo
         echo "| Severity | Family | Where | What |"
         echo "|---|---|---|---|"
@@ -228,7 +244,7 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
         echo "</details>"
       fi
       echo
-      echo "_Run: $REPO_URL/actions/runs/${GITHUB_RUN_ID} • commit \`${SHA:0:7}\`_"
+      echo "_<sub>Lisa &middot; run <a href=\"$REPO_URL/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_ID}</a> &middot; commit <code>${SHA:0:7}</code></sub>_"
     } > "$BODY_FILE"
 
     # Find an existing sticky comment (by sentinel) and edit it; otherwise create one.

@@ -31,7 +31,6 @@ A complete sample workflow is in
 | `output-dir` | no | `lisa-network-out` | Where `report.json` and `final-network.{txt,html,pdf}` are written. |
 | `fail-on-finding` | no | `true` | Fail the job when the routing checker reports findings. |
 | `severity-threshold` | no | `high` | `high` ignores medium findings for gating; `medium` fails on any finding. |
-| `analyzer-image` | no | `ghcr.io/anonymous/lisa-network:latest` | Container image of the analyzer. Pin to a release tag in production. |
 | `jvm-heap` | no | `4g` | `-Xmx` for the analyzer JVM. |
 | `annotations` | no | `true` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. |
 | `comment-on-pr` | no | `true` | Post (and update in place on reruns) a sticky PR-level comment with file:line links. Requires `pull-requests: write`. |
@@ -52,12 +51,20 @@ parallel, so the same finding is visible whichever tab the reviewer
 opens:
 
 1. **Sticky PR comment (Conversation tab).**  A single comment
-   posted on the PR (and edited in place on every rerun, via a
-   sentinel marker, so the timeline never accumulates duplicates).
-   Contains a markdown table with one row per finding —
-   severity, family, a clickable `file:line` link pinned to the
-   commit being analysed, and the finding title.  This is the
-   primary surface and the one most reviewers will land on.
+   posted on the PR under the **Lisa** persona (avatar + name,
+   referencing the underlying LiSA static-analysis engine) and
+   edited in place on every rerun via a sentinel marker, so the
+   timeline never accumulates duplicates.  Contains a markdown
+   table with one row per finding — severity, family, a clickable
+   `file:line` link pinned to the analysed commit, and the finding
+   title.  This is the primary surface and the one most reviewers
+   will land on.
+
+   The comment body is branded as Lisa but is still technically
+   authored by `github-actions[bot]` (the default
+   `GITHUB_TOKEN` identity).  To have the comment authored by a
+   genuine `lisa[bot]` GitHub-App identity, see
+   [`docs/lisa-github-app.md`](docs/lisa-github-app.md) (TODO).
 2. **Inline annotations (Files Changed tab).**  One `::warning::`
    per finding, anchored to the source file and line of the
    offending registration site, rendered as a coloured tag next to
@@ -83,49 +90,37 @@ output.
 | Duplicate registration | medium | Same `(method, path)` registered in two different files. |
 | Conditional registration | medium | Same path registered on incomparable `if`/`else` branches. |
 
-## Visibility / private repos
+## How the analyzer is shipped
 
-The action and the analyzer image can both be kept private. See the
-README section *"Private deployment"* below; in short, the analyzer
-image is pulled with `${{ secrets.GITHUB_TOKEN }}` when the package is
-in a private GHCR repo with the consuming repo granted access.
+The analyzer (`lisa-network` + its `pylisa` / `lisa` / `jlisa`
+dependencies) is **bundled directly in this repository** under
+`dist/lisa-network/`. The action invokes it through `actions/setup-java@v4`
+(Amazon Corretto 23) and the launcher script at
+`dist/lisa-network/bin/lisa-network`.
 
-## Setting up the analyzer image
+This makes the action self-contained: consuming workflows do not need
+to pull a Docker image, authenticate against GHCR, or know anything
+about the analyzer's build pipeline. Releases of the action are just
+git tags on this repo; updating the analyzer means updating the
+contents of `dist/lisa-network/` and cutting a new tag.
 
-This action does **not** ship the analyzer binary in the action repo
-itself; it pulls a pre-built container image (default
-`ghcr.io/anonymous/lisa-network:latest`).  To publish your own:
+Total dist size is ~62 MB (50+ JARs); the largest single JAR is 12 MB,
+well under git's per-file warning threshold.
 
-1. Copy [`examples/Dockerfile.publish`](examples/Dockerfile.publish)
-   into the `lisa-network` repo at `docker/Dockerfile.publish` —
-   alongside, not replacing, the existing bind-mount Dockerfile that
-   the corpus evaluation runs use.
-2. Copy
-   [`examples/publish-analyzer-image.yml`](examples/publish-analyzer-image.yml)
-   into the same repo at `.github/workflows/publish-image.yml`.
-3. Cut a tagged release on the `lisa-network` repo. The workflow
-   builds and pushes
-   `ghcr.io/<owner>/lisa-network:{latest,<sha>,<tag>}`.
-4. Point the consuming workflow at it via the `analyzer-image` input.
-
-The publishable Dockerfile clones the three sibling repos (`lisa`,
-`pylisa`, `jlisa`) at build time and publishes them to the build
-container's local Maven cache, so the final image is self-contained
-and the consuming workflow needs no awareness of the sibling-repo
-layout.
+If you ever prefer to ship the analyzer as a GHCR image instead
+(useful when the dist grows beyond ~100 MB, or when you want one
+analyzer source-of-truth across multiple actions), see
+[`examples/optional-docker-publishing/`](examples/optional-docker-publishing/)
+for a starter Dockerfile, publish workflow, and the changes the
+action would need.
 
 ## Private deployment
 
-To run this action and the analyzer image entirely inside your
-organisation:
-
-* Keep this action's repo private. Workflows in the same
-  organisation can `uses: <org>/fastapi-routing-check@<sha>` once
-  *Settings → Actions → General → Access* allows it.
-* Push the analyzer image to a private GHCR package and grant the
-  consuming repo *Manage Actions access*. The sample workflow's
-  `docker/login-action@v3` step handles authentication via
-  `${{ secrets.GITHUB_TOKEN }}`.
+The action repo can be kept private. Workflows in your other repos
+can `uses: giacomozanatta/fastapi-routing-check@<tag>` once
+*Settings → Actions → General → Access* on this repo allows it.
+There is no GHCR image to authenticate against, so no `docker login`
+step is required in the consuming workflow.
 
 ## Limitations
 

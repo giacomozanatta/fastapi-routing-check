@@ -1,6 +1,6 @@
 name: 'FastAPI Routing Check'
 description: 'Statically detect silent routing defects in FastAPI applications (duplicate-include, route shadowing, conditional registration) via lisa-network abstract interpretation.'
-author: 'Anonymous'
+author: 'Giacomo Zanatta'
 branding:
   icon: 'git-pull-request'
   color: 'purple'
@@ -25,10 +25,6 @@ inputs:
     description: 'Only fail on findings at or above this severity (high | medium). With "high", medium-severity findings are surfaced as annotations but do not fail the job.'
     required: false
     default: 'high'
-  analyzer-image:
-    description: 'Container image tag of the analyzer to use. Pin to a release tag (e.g. v0.1.0) in production workflows.'
-    required: false
-    default: 'ghcr.io/anonymous/lisa-network:latest'
   jvm-heap:
     description: 'Max JVM heap for the analyzer (passed as -Xmx). Default 4g matches the per-run budget used in the empirical study.'
     required: false
@@ -59,10 +55,11 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Pull analyzer image
-      shell: bash
-      run: |
-        docker pull "${{ inputs.analyzer-image }}"
+    - name: Set up JDK 23 (Corretto)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'corretto'
+        java-version: '23'
 
     - name: Run lisa-network
       id: run
@@ -73,7 +70,6 @@ runs:
         OUTPUT_DIR: ${{ inputs.output-dir }}
         FAIL_ON_FINDING: ${{ inputs.fail-on-finding }}
         SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
-        ANALYZER_IMAGE: ${{ inputs.analyzer-image }}
         JVM_HEAP: ${{ inputs.jvm-heap }}
         ANNOTATIONS: ${{ inputs.annotations }}
         COMMENT_ON_PR: ${{ inputs.comment-on-pr }}
