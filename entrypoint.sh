@@ -222,11 +222,8 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
     BODY_FILE="$WORKSPACE/$OUTPUT_DIR/pr-comment.md"
     {
       echo "$MARKER"
-      echo "<table><tr>"
-      echo "<td><img src=\"https://raw.githubusercontent.com/lisa-analyzer/lisa/main/.github/lisa-logo.png\" width=\"64\" alt=\"Lisa\"></td>"
-      echo "<td><h3>Lisa &mdash; FastAPI routing check</h3>"
-      echo "<sub>Static analysis by <a href=\"https://github.com/lisa-analyzer/lisa\">LiSA</a> via <a href=\"https://github.com/giacomozanatta/fastapi-routing-check\">fastapi-routing-check</a></sub></td>"
-      echo "</tr></table>"
+      echo "### Lisa &mdash; FastAPI routing check"
+      echo "<sub>Static analysis by <a href=\"https://github.com/lisa-analyzer/lisa\">LiSA</a> via <a href=\"https://github.com/giacomozanatta/fastapi-routing-check\">fastapi-routing-check</a></sub>"
       echo
       if (( findings_count == 0 )); then
         echo ":white_check_mark: No routing defects detected across **$endpoints_count** recovered endpoints."
