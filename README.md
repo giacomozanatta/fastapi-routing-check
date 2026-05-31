@@ -44,10 +44,11 @@ A complete sample workflow is in
 | `findings-count` | Total routing-checker findings. |
 | `high-severity-count` | Findings at severity `high`. |
 | `report-path` | Path to `report.json`. |
+| `sarif-path` | Path to `results.sarif` (SARIF 2.1.0). Pipe into `github/codeql-action/upload-sarif@v3` to render findings in the PR's Code Scanning / Security tab. Emitted unconditionally (empty results array clears stale findings on the branch). |
 
 ## What gets surfaced in the PR
 
-The action emits findings through **three** GitHub surfaces in
+The action emits findings through **four** GitHub surfaces in
 parallel, so the same finding is visible whichever tab the reviewer
 opens:
 
@@ -75,11 +76,34 @@ opens:
 3. **Job summary (Actions run page).**  The same table as the
    sticky comment, rendered at the top of the workflow run for
    maintainers reviewing the run itself.
+4. **Code Scanning alerts (Security tab).**  The action always emits
+   a SARIF 2.1.0 file at `${{ steps.check.outputs.sarif-path }}`.
+   Pipe it into `github/codeql-action/upload-sarif@v3` (see
+   [`examples/routing-check.yml`](examples/routing-check.yml)) and
+   findings render natively in the PR's *Code Scanning* check and the
+   repo's *Security → Code scanning alerts* view, with stable
+   fingerprints so the same defect is not reported twice across
+   re-runs.
 
-In addition, the full `report.json`, `final-network.pdf`, and
-`final-network.txt` are uploaded as workflow artefacts so reviewers
-can download the full topology and the routing checker's structured
-output.
+   **GitHub Advanced Security requirement.**  Code Scanning is free
+   on **public** repositories — the upload works out of the box.  On
+   **private** repositories it requires GitHub Advanced Security
+   (GHAS), which is only available on Enterprise plans for
+   organisations.  Without GHAS the `upload-sarif` step returns a
+   403; the example workflow uses `continue-on-error: true` so the
+   job stays green, and reviewers fall back to:
+   - the **sticky PR comment** + **inline annotations** (surfaces 1
+     and 2 above) — both work in any repo without extra entitlements;
+   - the **`results.sarif` artefact** uploaded with the rest of the
+     analysis bundle — view it locally with Microsoft's
+     [SARIF Viewer](https://marketplace.visualstudio.com/items?itemName=MS-SarifVSCode.sarif-viewer)
+     VS Code extension or with the web viewer at
+     [sarifweb.azurewebsites.net](https://sarifweb.azurewebsites.net/).
+
+In addition, the full `report.json`, `results.sarif`,
+`final-network.pdf`, and `final-network.txt` are uploaded as
+workflow artefacts so reviewers can download the full topology and
+the routing checker's structured output.
 
 ## Defect families detected
 
