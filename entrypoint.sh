@@ -431,6 +431,60 @@ fi
 } >> "$GITHUB_OUTPUT"
 
 # ---------------------------------------------------------------------------
+# 2.5. Endpoint delta vs PR merge-base
+#
+# Always run compute-delta.py — even when no baseline exists (non-PR event
+# or fork PR without merge-base resolution), the script handles missing /
+# empty input gracefully and emits a zero-totals delta.json. That keeps
+# downstream consumers (workflow Summary, sticky PR comment, action
+# outputs) seeing a consistent JSON shape.
+#
+# This logic intentionally lives in entrypoint.sh — running it as a
+# trailing composite step in action.yml means the sticky PR comment
+# written below (section 5) couldn't embed the delta section.
+# ---------------------------------------------------------------------------
+BASELINE_TSV="$WORKSPACE/${OUTPUT_DIR}-baseline/endpoints.tsv"
+DELTA_JSON="$WORKSPACE/$OUTPUT_DIR/delta.json"
+DELTA_MARKDOWN_PLAIN=""        # job-summary surface (unlinked file:line)
+DELTA_MARKDOWN_LINKED=""       # sticky-comment surface (file:line → repo blob)
+endpoints_added=0
+endpoints_removed=0
+endpoints_moved=0
+
+# Create an empty baseline file if the action's baseline step decided not
+# to run (push event, fork PR, endpoint-delta input set to false). The
+# diff script treats empty-vs-populated as "first run, no baseline" and
+# emits status=ok with all-zero totals.
+[[ -f "$BASELINE_TSV" ]] || { mkdir -p "$(dirname "$BASELINE_TSV")"; : > "$BASELINE_TSV"; }
+[[ -f "$ENDPOINTS_TSV" ]] || : > "$ENDPOINTS_TSV"
+
+python3 "${ACTION_PATH}/bin/compute-delta.py" "$BASELINE_TSV" "$ENDPOINTS_TSV" "$DELTA_JSON"
+
+# Pull the totals back out for action outputs + the renderer's gate.
+endpoints_added=$(python3 -c "import json; print(json.load(open('$DELTA_JSON'))['totals'].get('added', 0))")
+endpoints_removed=$(python3 -c "import json; print(json.load(open('$DELTA_JSON'))['totals'].get('removed', 0))")
+endpoints_moved=$(python3 -c "import json; print(json.load(open('$DELTA_JSON'))['totals'].get('moved', 0))")
+
+# Render twice — the renderer's --repo-url/--sha switch toggles whether
+# file:line cells become permalinks. Job summary doesn't need links
+# (it's already inside the workflow run page); the sticky PR comment
+# does (the reader is on the Conversation tab, away from the source).
+DELTA_MARKDOWN_PLAIN=$(python3 "${ACTION_PATH}/bin/render-delta.py" "$DELTA_JSON")
+if [[ -n "${GITHUB_REPOSITORY:-}" && -n "${GITHUB_SHA:-}" ]]; then
+  DELTA_MARKDOWN_LINKED=$(python3 "${ACTION_PATH}/bin/render-delta.py" "$DELTA_JSON" \
+    --repo-url "https://github.com/${GITHUB_REPOSITORY}" --sha "$GITHUB_SHA")
+else
+  DELTA_MARKDOWN_LINKED="$DELTA_MARKDOWN_PLAIN"
+fi
+
+{
+  echo "endpoints-added=$endpoints_added"
+  echo "endpoints-removed=$endpoints_removed"
+  echo "endpoints-moved=$endpoints_moved"
+  echo "delta-path=$OUTPUT_DIR/delta.json"
+} >> "$GITHUB_OUTPUT"
+
+# ---------------------------------------------------------------------------
 # 3. Job summary (always — visible at the top of the Actions run page)
 # ---------------------------------------------------------------------------
 {
@@ -454,6 +508,14 @@ fi
       fi
       echo "| $sev | $fam | $where | $title |"
     done < "$FINDINGS_TSV"
+  fi
+
+  # Endpoint delta section — emitted only when the renderer produced
+  # output (i.e. at least one added/removed/moved, OR an asymmetric-zero
+  # warning). Empty output on no-op PRs keeps the summary tight.
+  if [[ -n "$DELTA_MARKDOWN_PLAIN" ]]; then
+    echo
+    echo "$DELTA_MARKDOWN_PLAIN"
   fi
 
   # Collapsible endpoint inventory — always emitted when at least one
@@ -546,6 +608,15 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
           echo "| $icon $sev | $fam | $where | $esc_title |"
         done < "$FINDINGS_TSV"
+      fi
+
+      # Endpoint delta — emit only when the renderer produced output,
+      # so no-op PRs don't gain an "Endpoint delta vs base" heading
+      # followed by nothing. Linked variant used here (PR readers are
+      # on the Conversation tab, source links help).
+      if [[ -n "$DELTA_MARKDOWN_LINKED" ]]; then
+        echo
+        echo "$DELTA_MARKDOWN_LINKED"
       fi
 
       # Collapsible endpoint inventory — emitted in both the

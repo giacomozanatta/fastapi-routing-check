@@ -21,3 +21,12 @@ def readyz():
 @router.get("/version")
 def version():
     return {"version": "0.2"}
+
+
+# Added in the sticky-delta-render PR so the self-test exercises the
+# rendering live: this PR's own CI run should produce a sticky comment
+# whose "Endpoint delta vs base" section shows "+1 added" with this
+# line as the source. Clean literal, no overlaps, no findings.
+@router.get("/buildinfo")
+def buildinfo():
+    return {"build": "fastapi-routing-check-selftest"}
