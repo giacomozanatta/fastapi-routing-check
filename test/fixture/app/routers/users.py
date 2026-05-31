@@ -1,8 +1,7 @@
 """Users router with a nested admin sub-router.
 
-Seeds: duplicate-include — admin_router is included twice under
-the same /admin prefix; every admin route exposed by the second
-inclusion is silently unreachable at runtime.
+The admin sub-router is included exactly once under the /admin prefix,
+so every admin route is reachable at runtime.
 """
 from fastapi import APIRouter
 
@@ -36,9 +35,4 @@ def create_user(name: str):
 
 
 # Sub-router inclusion — admin endpoints under /admin
-router.include_router(admin_router, prefix="/admin")
-
-# BUG: the same admin sub-router is included a second time. FastAPI
-# happily registers every admin route twice; the duplicate is dead
-# under first-match dispatch.
 router.include_router(admin_router, prefix="/admin")
