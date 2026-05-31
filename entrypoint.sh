@@ -213,10 +213,12 @@ fi
         where="\`$fpath:$fline\`"
       fi
       sev_cell="$sev"
-      # shields.io style=plastic: the small, glossy variant — visible
-      # enough to pop in a table cell but short enough not to blow out
-      # the row height the way `for-the-badge` did.
-      [[ "$is_new" == "NEW" ]] && sev_cell="$sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=plastic)"
+      # Parenthetical "(NEW)" inline with severity — plain text, no
+      # external image dependency, no row-height distortion, renders
+      # identically in every markdown viewer. Parens read as
+      # annotation rather than a separate word so the eye groups
+      # "HIGH (NEW)" as one unit.
+      [[ "$is_new" == "NEW" ]] && sev_cell="$sev (NEW)"
       echo "| $sev_cell | $fam | $where | $title |"
     done
   fi
@@ -329,9 +331,10 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           sev_lc=$(printf '%s' "$sev" | tr '[:upper:]' '[:lower:]')
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
           sev_cell="$icon $sev"
-          # shields.io style=plastic — small glossy chip that doesn't
-          # stretch the row height the way for-the-badge did.
-          [[ "$is_new" == "NEW" ]] && sev_cell="$icon $sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=plastic)"
+          # Parenthetical "(NEW)" inline with severity — plain text,
+          # no image dependency. Same format used by the job summary
+          # so both surfaces look identical.
+          [[ "$is_new" == "NEW" ]] && sev_cell="$icon $sev (NEW)"
           echo "| $sev_cell | $fam | $where | $esc_title |"
         done
       fi
