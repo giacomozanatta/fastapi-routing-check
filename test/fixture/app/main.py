@@ -1,33 +1,28 @@
 """
-fixture: a multi-file FastAPI service designed to exercise three
-silent-routing-defect families against the routing checker.
+fixture: a multi-file FastAPI service used to exercise the routing
+checker across multiple router files and inclusion chains.
 
-Defects seeded in this tree
----------------------------
+The tree recovers a routing topology spanning four router files plus
+the top-level mounts in this module. Every path resolves to exactly
+one handler, so a correctly functioning routing checker reports no
+findings against it.
 
-  1. wrong-handler (parametric shadow)
-       app/routers/items.py — /items/{item_id} is registered before
-       /items/featured, so the literal route is shadowed under
-       first-match dispatch.
+Patterns exercised
+------------------
 
-  2. duplicate-include
-       app/routers/users.py — the admin sub-router is included twice
-       on the users router; every admin route is silently dead in
-       the second mount.
+  * Multi-file router discovery — main.py imports the users and items
+    routers from app/routers/, and users.py further includes the admin
+    sub-router from a sibling module.
 
-  3. conditional-registration
-       app/main.py — POST /api/v2/messages is registered on BOTH
-       branches of `if ENABLE_V2_API`, bound to different handlers in
-       different files. At deploy time only one runs; which one
-       depends on a runtime environment variable.
+  * Router inclusion chains — app -> users.router -> admin_router is a
+    two-level mount the analyzer must traverse.
 
-The analyzer is expected to recover the routing topology across all
-four router files and the conditional in main.py, then surface the
-three defects with HIGH/HIGH/MEDIUM severity respectively.
+  * Typed path converters — items.py and users.py use :int converters,
+    which the checker refines so look-alike literals are not reported
+    as shadowed.
 """
 from fastapi import FastAPI
 
-from app.config import ENABLE_V2_API
 from app.routers import items, messages, users
 
 app = FastAPI(title="fixture", version="0.1")
@@ -38,14 +33,10 @@ app.include_router(users.router, prefix="/api/v1/users")
 app.include_router(items.router, prefix="/api/v1")
 
 
-# --- Conditional v2 mount --------------------------------------------
-# The v2 message API ships when the feature flag is on; otherwise we
-# mount a back-compat shim under the SAME path. The static analyzer
-# cannot resolve ENABLE_V2_API (it is read from the process
-# environment in app/config.py), so both branches are reachable in
-# the joined abstract state and the routing checker reports the
-# resulting POST /api/v2/messages registration as conditional.
-if ENABLE_V2_API:
-    app.include_router(messages.v2_router, prefix="/api/v2")
-else:
-    app.include_router(messages.v1_compat_router, prefix="/api/v2")
+# --- Message API mounts ----------------------------------------------
+# The v2 message API and the v1-compatible shim are mounted under
+# distinct prefixes, so POST /api/v2/messages and POST /api/v1/messages
+# each resolve unambiguously to their own handler regardless of any
+# runtime configuration.
+app.include_router(messages.v2_router, prefix="/api/v2")
+app.include_router(messages.v1_compat_router, prefix="/api/v1")

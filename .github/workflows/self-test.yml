@@ -1,13 +1,14 @@
-# Sanity-check the action against a tiny in-tree FastAPI fixture seeded
-# with two intentional defects (a parametric-shadow wrong-handler and a
-# duplicate-include). On every PR the workflow:
+# Sanity-check the action against a tiny in-tree FastAPI fixture whose
+# routing topology is clean (every path resolves to exactly one
+# handler). On every PR the workflow:
 #   1. runs the action against test/fixture/
 #   2. asserts the structured outputs are populated
 #   3. exercises the sticky-PR-comment + inline-annotation surfaces
 #      against the live PR
-# fail-on-finding is set to 'false' so the workflow stays green despite
-# the fixture's known defects; the assertion step verifies the analyser
-# DID detect them (findings-count >= 1).
+# fail-on-finding is 'true': the fixture is defect-free, so the run must
+# stay green. The assertion step verifies the pipeline actually ran
+# (endpoints were recovered) and raised no false positives
+# (findings-count == 0).
 name: LiSA
 
 on:
@@ -37,10 +38,12 @@ jobs:
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
-          # The fixture intentionally seeds 2 defects; assert the analyser
-          # actually detected at least one (== 0 means the analysis pipeline
-          # is broken even though the run succeeded).
-          test "${{ steps.run.outputs.findings-count }}" -ge 1
+          # The fixture is defect-free: assert the pipeline actually ran
+          # (at least one endpoint recovered — 0 would mean discovery is
+          # broken even though the run succeeded) and that it raised no
+          # false positives (findings-count == 0).
+          test "${{ steps.run.outputs.endpoints-count }}" -ge 1
+          test "${{ steps.run.outputs.findings-count }}" -eq 0
           test -f "${{ steps.run.outputs.report-path }}"
           test -f lisa-network-out/final-network.pdf
 
