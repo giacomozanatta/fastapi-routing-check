@@ -8,7 +8,7 @@
 # fail-on-finding is set to 'false' so the workflow stays green despite
 # the fixture's known defects; the assertion step verifies the analyser
 # DID detect them (findings-count >= 1).
-name: Self-test
+name: analysis/lisa
 
 on:
   pull_request:     # any PR — the action repo is small enough to self-test on every change
@@ -19,7 +19,7 @@ permissions:
   pull-requests: write   # required for the sticky PR comment
 
 jobs:
-  smoke:
+  fastapi-routing-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
