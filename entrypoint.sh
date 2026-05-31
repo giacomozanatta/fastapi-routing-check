@@ -213,10 +213,10 @@ fi
         where="\`$fpath:$fline\`"
       fi
       sev_cell="$sev"
-      # for-the-badge style is the chunky high-visibility variant —
-      # large enough that NEW findings jump off the page without the
-      # reader hunting for a tiny chip.
-      [[ "$is_new" == "NEW" ]] && sev_cell="$sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=for-the-badge)"
+      # shields.io style=plastic: the small, glossy variant — visible
+      # enough to pop in a table cell but short enough not to blow out
+      # the row height the way `for-the-badge` did.
+      [[ "$is_new" == "NEW" ]] && sev_cell="$sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=plastic)"
       echo "| $sev_cell | $fam | $where | $title |"
     done
   fi
@@ -329,9 +329,9 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           sev_lc=$(printf '%s' "$sev" | tr '[:upper:]' '[:lower:]')
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
           sev_cell="$icon $sev"
-          # for-the-badge style is the chunky high-visibility variant
-          # so NEW findings genuinely stand out at a glance.
-          [[ "$is_new" == "NEW" ]] && sev_cell="$icon $sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=for-the-badge)"
+          # shields.io style=plastic — small glossy chip that doesn't
+          # stretch the row height the way for-the-badge did.
+          [[ "$is_new" == "NEW" ]] && sev_cell="$icon $sev ![NEW](https://img.shields.io/badge/NEW-d73a4a?style=plastic)"
           echo "| $sev_cell | $fam | $where | $esc_title |"
         done
       fi
