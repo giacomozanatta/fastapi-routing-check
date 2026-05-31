@@ -1,14 +1,15 @@
-# Sanity-check the action against a tiny in-tree FastAPI fixture whose
-# routing topology is clean (every path resolves to exactly one
-# handler). On every PR the workflow:
+# Sanity-check the action against an in-tree FastAPI fixture that seeds
+# one defect from every family the routing checker can detect, alongside
+# intentionally clean routers that must NOT trigger findings. On every PR
+# the workflow:
 #   1. runs the action against test/fixture/
-#   2. asserts the structured outputs are populated
+#   2. asserts every defect family was detected (and none were missed)
 #   3. exercises the sticky-PR-comment + inline-annotation surfaces
 #      against the live PR
-# fail-on-finding is 'true': the fixture is defect-free, so the run must
-# stay green. The assertion step verifies the pipeline actually ran
-# (endpoints were recovered) and raised no false positives
-# (findings-count == 0).
+# fail-on-finding is 'false' so the workflow stays green despite the
+# fixture's intentional defects; the assertion step verifies the analyser
+# DID detect them — one per family — with no false positives leaking in
+# from the clean routers.
 name: LiSA
 
 on:
@@ -31,21 +32,39 @@ jobs:
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
-          fail-on-finding: 'true'
+          fail-on-finding: 'false'
 
       - name: Verify outputs
         run: |
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
-          # The fixture is defect-free: assert the pipeline actually ran
-          # (at least one endpoint recovered — 0 would mean discovery is
-          # broken even though the run succeeded) and that it raised no
-          # false positives (findings-count == 0).
+          # The fixture seeds one defect per family: assert the pipeline
+          # ran (endpoints recovered), that every family was detected, and
+          # that no false positives leaked in from the clean routers.
           test "${{ steps.run.outputs.endpoints-count }}" -ge 1
-          test "${{ steps.run.outputs.findings-count }}" -eq 0
+          test "${{ steps.run.outputs.findings-count }}" -eq 6
+          test "${{ steps.run.outputs.high-severity-count }}" -eq 4
           test -f "${{ steps.run.outputs.report-path }}"
           test -f lisa-network-out/final-network.pdf
+          # Every detectable family must appear by its warning headline.
+          python3 - "${{ steps.run.outputs.report-path }}" <<'PY'
+          import json, sys
+          msgs = "\n".join(
+              w.get("message", "")
+              for w in (json.load(open(sys.argv[1])).get("warnings") or [])
+          ).lower()
+          needed = [
+              "duplicate include",
+              "wrong handler",
+              "handler is dead code",
+              "duplicate registration",
+              "conditional registration",
+          ]
+          missing = [n for n in needed if n not in msgs]
+          assert not missing, f"families not detected: {missing}"
+          print("all defect families detected")
+          PY
 
       - name: Upload analysis artefacts
         if: always()
