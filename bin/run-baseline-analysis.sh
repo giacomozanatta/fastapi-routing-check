@@ -17,9 +17,12 @@
 #  - git worktree (not git stash / git checkout) keeps $GITHUB_WORKSPACE
 #    untouched, so the head analysis below runs against the unchanged
 #    PR tree without us having to dance with stash/pop.
-#  - We only need endpoints.tsv from the baseline run — final-network.pdf,
-#    .html, .mmd, report.json, and the SARIF are head-only concerns.
-#    Throwing the rest away keeps the cache entry small (~10–100 KB).
+#  - We need two artefacts from the baseline run: endpoints.tsv (for the
+#    endpoint-delta diff) and findings.tsv (so the head's parse-warnings
+#    can mark each finding as NEW vs already-on-baseline). report.json
+#    is parsed transiently — only the two TSVs survive into the cache.
+#    final-network.pdf, .html, .mmd, and the SARIF are head-only concerns.
+#    Trimming to the two TSVs keeps the cache entry small (~20–200 KB).
 #  - Failure mode: if the merge-base SHA predates the project layout
 #    that --main-file refers to (e.g., src/dispatch/main.py only exists
 #    in newer commits), the analyzer will error. We exit 0 anyway so the
@@ -67,20 +70,39 @@ echo "==> running analyzer against merge-base"
 }
 
 BASELINE_FINAL_TXT="${BASELINE_OUT}/final-network.txt"
-BASELINE_TSV="${BASELINE_OUT}/endpoints.tsv"
+BASELINE_REPORT="${BASELINE_OUT}/report.json"
+BASELINE_ENDPOINTS_TSV="${BASELINE_OUT}/endpoints.tsv"
+BASELINE_FINDINGS_TSV="${BASELINE_OUT}/findings.tsv"
 
 if [[ ! -f "$BASELINE_FINAL_TXT" ]]; then
   echo "::warning::Baseline analyzer did not produce final-network.txt; delta will be skipped."
-  : > "$BASELINE_TSV"
+  : > "$BASELINE_ENDPOINTS_TSV"
+  : > "$BASELINE_FINDINGS_TSV"
   exit 0
 fi
 
 echo "==> extracting baseline endpoints"
-python3 "${ACTION_PATH}/bin/parse-endpoints.py" "$BASELINE_FINAL_TXT" "$BASELINE_TSV"
+python3 "${ACTION_PATH}/bin/parse-endpoints.py" "$BASELINE_FINAL_TXT" "$BASELINE_ENDPOINTS_TSV"
 
-# Trim the cached payload to only what the delta step needs. Cache
-# entries this small (typically <100 KB) keep us well below GitHub's
-# 10 GB-per-repo limit even at hundreds of distinct merge-bases.
-find "$BASELINE_OUT" -mindepth 1 -not -name 'endpoints.tsv' -not -path "${BASELINE_OUT}" -exec rm -rf {} + 2>/dev/null || true
+# Findings parsing is best-effort: a baseline run that produced
+# final-network.txt may still lack report.json on edge cases. Touch an
+# empty file so the head's parse-warnings.py treats it as "no baseline
+# findings" (every head finding marked NEW) rather than crashing.
+if [[ -f "$BASELINE_REPORT" ]]; then
+  echo "==> extracting baseline findings"
+  python3 "${ACTION_PATH}/bin/parse-warnings.py" "$BASELINE_REPORT" "$BASELINE_FINDINGS_TSV" \
+    --families "${FAMILIES:-all}" \
+    --version baseline
+else
+  echo "::warning::Baseline run produced no report.json; head findings will all be classified as NEW."
+  : > "$BASELINE_FINDINGS_TSV"
+fi
 
-echo "==> baseline cache populated: $BASELINE_TSV ($(wc -l < "$BASELINE_TSV" | tr -d ' ') endpoints)"
+# Trim the cached payload to the two TSVs the head needs. Cache entries
+# this small (~20–200 KB) keep us well below GitHub's 10 GB-per-repo
+# limit even at hundreds of distinct merge-bases.
+find "$BASELINE_OUT" -mindepth 1 \
+  -not -name 'endpoints.tsv' -not -name 'findings.tsv' \
+  -not -path "${BASELINE_OUT}" -exec rm -rf {} + 2>/dev/null || true
+
+echo "==> baseline cache populated: $(wc -l < "$BASELINE_ENDPOINTS_TSV" | tr -d ' ') endpoints, $(wc -l < "$BASELINE_FINDINGS_TSV" | tr -d ' ') findings"

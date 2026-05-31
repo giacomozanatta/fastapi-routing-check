@@ -114,16 +114,19 @@ runs:
           echo "sha=" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Restore baseline endpoints cache
+    - name: Restore baseline cache
       id: baseline-cache
       if: steps.merge-base.outputs.sha != ''
       uses: actions/cache@v4
       with:
-        path: ${{ inputs.output-dir }}-baseline/endpoints.tsv
+        # Cache the whole baseline directory so both endpoints.tsv (for
+        # the endpoint-delta diff) and findings.tsv (for the NEW-finding
+        # badge / SARIF baselineState) ride along on the same key.
+        path: ${{ inputs.output-dir }}-baseline
         # Hash the bundled analyzer JARs + the action's wiring so a bump
         # to either invalidates the cache (correct behaviour — see comment
         # block above).
-        key: lisa-endpoints-${{ runner.os }}-${{ steps.merge-base.outputs.sha }}-${{ hashFiles('action.yml', 'entrypoint.sh', 'bin/parse-endpoints.py', 'dist/lisa-network/lib/**') }}
+        key: lisa-baseline-${{ runner.os }}-${{ steps.merge-base.outputs.sha }}-${{ hashFiles('action.yml', 'entrypoint.sh', 'bin/parse-endpoints.py', 'bin/parse-warnings.py', 'dist/lisa-network/lib/**') }}
 
     - name: Analyse merge-base (cache miss)
       if: steps.merge-base.outputs.sha != '' && steps.baseline-cache.outputs.cache-hit != 'true'
@@ -132,6 +135,7 @@ runs:
         MAIN_FILE: ${{ inputs.main-file }}
         PROJECT_DIR: ${{ inputs.project-dir }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
+        FAMILIES: ${{ inputs.families }}
         JVM_HEAP: ${{ inputs.jvm-heap }}
         ACTION_PATH: ${{ github.action_path }}
         MERGE_BASE_SHA: ${{ steps.merge-base.outputs.sha }}
