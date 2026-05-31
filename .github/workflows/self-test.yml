@@ -1,19 +1,22 @@
-# Sanity-check the action against a tiny in-tree FastAPI fixture.
-# Run this in the action repo itself before tagging a release.
+# Sanity-check the action against a tiny in-tree FastAPI fixture seeded
+# with two intentional defects (a parametric-shadow wrong-handler and a
+# duplicate-include). On every PR the workflow:
+#   1. runs the action against test/fixture/
+#   2. asserts the structured outputs are populated
+#   3. exercises the sticky-PR-comment + inline-annotation surfaces
+#      against the live PR
+# fail-on-finding is set to 'false' so the workflow stays green despite
+# the fixture's known defects; the assertion step verifies the analyser
+# DID detect them (findings-count >= 1).
 name: Self-test
 
 on:
-  pull_request:
-    paths:
-      - 'action.yml'
-      - 'entrypoint.sh'
-      - '.github/workflows/self-test.yml'
-      - 'test/**'
+  pull_request:     # any PR — the action repo is small enough to self-test on every change
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: read
+  pull-requests: write   # required for the sticky PR comment
 
 jobs:
   smoke:
@@ -21,23 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Run action against test/fixture
         id: run
         uses: ./
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
-          fail-on-finding: 'false'   # we want the action to succeed; we just check outputs
+          fail-on-finding: 'false'
 
       - name: Verify outputs
         run: |
-          test "${{ steps.run.outputs.endpoints-count }}" != ""
-          test "${{ steps.run.outputs.findings-count }}" != ""
+          echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
+          echo "findings-count=${{ steps.run.outputs.findings-count }}"
+          echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
+          # The fixture intentionally seeds 2 defects; assert the analyser
+          # actually detected at least one (== 0 means the analysis pipeline
+          # is broken even though the run succeeded).
+          test "${{ steps.run.outputs.findings-count }}" -ge 1
           test -f "${{ steps.run.outputs.report-path }}"
