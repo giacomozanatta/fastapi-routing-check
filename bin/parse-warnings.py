@@ -209,11 +209,20 @@ def load_baseline_identities(baseline_tsv: str | None) -> set[str]:
 
 def write_tsv(rows: list[tuple[str, str, str, str, str, str]], tsv_path: str,
               baseline_ids: set[str], emit_new_column: bool) -> int:
-    """Write the 6-col findings TSV. Returns the number of NEW rows."""
+    """Write the 6-col findings TSV. Returns the number of NEW rows.
+
+    The NEW column carries the literal "NEW" or "-" — never empty. bash
+    `IFS=$'\\t' read` strips leading empty fields when IFS contains only
+    whitespace chars (which $'\\t' does, per POSIX), so an empty first
+    column would shift all six variables by one in every downstream
+    render loop. "-" is a non-empty placeholder that preserves the field
+    position and reads as "not NEW" in the bash check `[[ "$is_new"
+    == "NEW" ]]`.
+    """
     new_count = 0
     with open(tsv_path, "w") as fh:
         for sev, fam, fpath, fline, title, _body in rows:
-            is_new = ""
+            is_new = "-"
             if emit_new_column:
                 ident = _identity(sev, fam, fpath, title)
                 if ident not in baseline_ids:
