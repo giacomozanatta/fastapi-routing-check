@@ -179,9 +179,62 @@ high_count=$(awk -F'\t' 'tolower($1)=="high"' "$FINDINGS_TSV" | wc -l | tr -d ' 
 medium_count=$(awk -F'\t' 'tolower($1)=="medium"' "$FINDINGS_TSV" | wc -l | tr -d ' ')
 
 endpoints_count="0"
+ENDPOINTS_TSV="$WORKSPACE/$OUTPUT_DIR/endpoints.tsv"
+: > "$ENDPOINTS_TSV"
 if [[ -f "$FINAL_TXT" ]]; then
   endpoints_count=$(grep -Eo 'COUNT[[:space:]]*[:=][[:space:]]*[0-9]+' "$FINAL_TXT" \
     | head -n1 | grep -Eo '[0-9]+' || echo 0)
+  # Parse the per-method endpoint listing out of final-network.txt.
+  # Layout:
+  #   COUNT: N
+  #   GET: K
+  #       /api/v1/items/featured: app/main.py:22:25
+  #       /api/v1/items/{item_id}: app/main.py:22:25
+  #   POST: M
+  #       ...
+  #   (blank line ends the endpoint section; the rest of the file
+  #    holds unrelated UNREACHABLE ROUTES / DUPLICATE include_router
+  #    REGISTRATIONS sections.)
+  # We emit one row per (method, path) into endpoints.tsv with columns
+  #   method \t path \t fpath \t fline
+  # using "-" as the sentinel for "unresolved path" so bash read does
+  # not collapse empty fields under whitespace-only IFS.
+  python3 - "$FINAL_TXT" "$ENDPOINTS_TSV" <<'PY'
+import re, sys
+in_path, out_path = sys.argv[1], sys.argv[2]
+method_re   = re.compile(r"^([A-Z]+):\s*\d+\s*$")
+endpoint_re = re.compile(r"^\s+(\S.+?):\s*(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):\d+\s*$")
+current = None
+rows = []
+seen = set()  # de-dup identical (method, path, file, line) lines
+with open(in_path, encoding="utf-8", errors="replace") as f:
+    for raw in f:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            if current is not None:
+                # blank line after we entered the listing -> end of section
+                break
+            continue
+        m = method_re.match(line)
+        if m:
+            current = m.group(1)
+            continue
+        if current is None:
+            continue
+        em = endpoint_re.match(line)
+        if not em:
+            continue
+        path, fpath, fline = em.group(1).strip(), em.group(2), em.group(3)
+        key = (current, path, fpath, fline)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((current, path, fpath, fline))
+with open(out_path, "w") as f:
+    for r in rows:
+        f.write("\t".join(r) + "\n")
+print(f"parsed {len(rows)} endpoints -> {out_path}", file=sys.stderr)
+PY
 fi
 
 {
@@ -215,6 +268,26 @@ fi
       fi
       echo "| $sev | $fam | $where | $title |"
     done < "$FINDINGS_TSV"
+  fi
+
+  # Collapsible endpoint inventory — always emitted when at least one
+  # endpoint was recovered, so reviewers can audit the topology the
+  # checker reasoned over without downloading final-network.txt.
+  if [[ -s "$ENDPOINTS_TSV" ]]; then
+    n_ep=$(wc -l < "$ENDPOINTS_TSV" | tr -d ' ')
+    echo
+    echo "<details>"
+    echo "<summary>All endpoints ($n_ep)</summary>"
+    echo
+    echo "| Method | Path | Source |"
+    echo "|---|---|---|"
+    while IFS=$'\t' read -r method epath efpath efline; do
+      esrc="\`$efpath:$efline\`"
+      [[ "$efpath" == "-" || -z "$efpath" ]] && esrc="(unresolved)"
+      echo "| $method | \`$epath\` | $esrc |"
+    done < "$ENDPOINTS_TSV"
+    echo
+    echo "</details>"
   fi
 } >> "$GITHUB_STEP_SUMMARY"
 
@@ -287,15 +360,33 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
           echo "| $icon $sev | $fam | $where | $esc_title |"
         done < "$FINDINGS_TSV"
+      fi
+
+      # Collapsible endpoint inventory — emitted in both the
+      # "no findings" and "findings" branches so reviewers can audit
+      # the topology the checker reasoned over.
+      if [[ -s "$ENDPOINTS_TSV" ]]; then
+        n_ep=$(wc -l < "$ENDPOINTS_TSV" | tr -d ' ')
         echo
-        echo "<details><summary>Full report (collapsed)</summary>"
+        echo "<details>"
+        echo "<summary>All endpoints ($n_ep)</summary>"
         echo
-        echo "Download \`lisa-network-report\` from this run's artefacts for the complete \`report.json\`, \`final-network.pdf\`, and \`final-network.txt\`."
+        echo "| Method | Path | Source |"
+        echo "|---|---|---|"
+        while IFS=$'\t' read -r method epath efpath efline; do
+          if [[ "$efpath" == "-" || -z "$efpath" ]]; then
+            esrc="(unresolved)"
+          else
+            esrc="[\`$efpath:$efline\`]($REPO_URL/blob/$SHA/$efpath#L$efline)"
+          fi
+          esc_path=$(printf '%s' "$epath" | sed 's/|/\\|/g')
+          echo "| \`$method\` | \`$esc_path\` | $esrc |"
+        done < "$ENDPOINTS_TSV"
         echo
         echo "</details>"
       fi
       echo
-      echo "_<sub>Lisa &middot; run <a href=\"$REPO_URL/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_ID}</a> &middot; commit <code>${SHA:0:7}</code></sub>_"
+      echo "_<sub>Lisa &middot; full \`report.json\`, \`final-network.pdf\`, and \`final-network.txt\` available as \`lisa-network-report\` on run <a href=\"$REPO_URL/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_ID}</a> &middot; commit <code>${SHA:0:7}</code></sub>_"
     } > "$BODY_FILE"
 
     # Find an existing sticky comment (by sentinel) and edit it; otherwise create one.
