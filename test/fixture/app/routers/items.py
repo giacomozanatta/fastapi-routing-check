@@ -33,3 +33,20 @@ def get_featured():
 @router.get("/items/{item_id}/reviews")
 def list_reviews(item_id: str):
     return {"item_id": item_id, "reviews": []}
+
+
+# Below: a typed-parametric route followed by a literal that looks
+# like a shadow at the routing layer but is refined away by the
+# checker's Pydantic-style validation pass — "stats" is not a valid
+# int, so the :int path-converter would reject the URL at validation
+# time and the literal /items/numeric/stats handler actually runs.
+# The routing checker should mark this STRICT_ONLY (refined away)
+# rather than emitting a HIGH wrong-handler.
+@router.get("/items/numeric/{num:int}")
+def get_numeric_item(num: int):
+    return {"num": num, "via": "parametric-int"}
+
+
+@router.get("/items/numeric/stats")
+def numeric_stats():
+    return {"count": 100, "via": "literal"}
