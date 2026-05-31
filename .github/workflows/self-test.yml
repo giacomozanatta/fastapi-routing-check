@@ -43,20 +43,40 @@ jobs:
         with:
           fetch-depth: 0
 
+      # continue-on-error: the fixture seeds 4 high-severity findings and
+      # we keep fail-on-finding: 'true' so the self-test exercises the
+      # gate path. Without continue-on-error the job goes red on the
+      # gate's intentional exit-1 and every subsequent step skips —
+      # Verify never runs and we lose visibility into the actual
+      # assertions. Verify asserts steps.run.outcome == 'failure' so a
+      # regression that breaks the gate (action returns 0 on findings)
+      # still fails the self-test.
       - name: Run action against test/fixture
         id: run
+        continue-on-error: true
         uses: ./
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
           fail-on-finding: 'true'
 
+      # if: always() because the Run step intentionally exits 1 on the
+      # fixture's seeded high-severity findings (fail-on-finding: 'true'
+      # exercises the gate path). Without always(), the Verify step
+      # gets skipped on every run and the assertions never execute.
       - name: Verify outputs
+        if: always() && steps.run.conclusion != 'skipped' && steps.run.conclusion != 'cancelled'
         run: |
+          echo "run.outcome           = ${{ steps.run.outcome }}"
           echo "endpoints-count=${{ steps.run.outputs.endpoints-count }}"
           echo "findings-count=${{ steps.run.outputs.findings-count }}"
           echo "high-severity-count=${{ steps.run.outputs.high-severity-count }}"
           echo "sarif-path=${{ steps.run.outputs.sarif-path }}"
+          # Gate-fired assertion: the fixture has 4 high-severity findings
+          # and fail-on-finding is 'true', so the action MUST exit non-zero.
+          # If it returned success here, the gate is broken and a real
+          # downstream consumer would silently merge broken routing.
+          test "${{ steps.run.outcome }}" = "failure"
           # The fixture seeds one defect per family: assert the pipeline
           # ran (endpoints recovered), that every family was detected, and
           # that no false positives leaked in from the clean routers.
