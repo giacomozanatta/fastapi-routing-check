@@ -55,11 +55,11 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Set up JDK 23 (Corretto)
+    - name: Set up JDK 25 (Corretto)
       uses: actions/setup-java@v4
       with:
         distribution: 'corretto'
-        java-version: '23'
+        java-version: '25'
 
     - name: Run lisa-network
       id: run
