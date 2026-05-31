@@ -87,6 +87,11 @@ opens:
 3. **Job summary (Actions run page).**  The same table as the
    sticky comment, rendered at the top of the workflow run for
    maintainers reviewing the run itself.
+
+   On pull-request runs both surfaces also include an **Endpoint
+   delta vs base** section (added / removed / moved relative to
+   the PR's merge-base) — see the `endpoint-delta` input.  The
+   section is suppressed on no-op PRs to keep the comment quiet.
 4. **Code Scanning alerts (Security tab).**  The action always emits
    a SARIF 2.1.0 file at `${{ steps.check.outputs.sarif-path }}`.
    Pipe it into `github/codeql-action/upload-sarif@v3` (see
