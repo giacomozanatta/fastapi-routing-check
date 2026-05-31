@@ -33,7 +33,7 @@ A complete sample workflow is in
 | `severity-threshold` | no | `high` | `high` ignores medium findings for gating; `medium` fails on any finding. |
 | `families` | no | `all` | Comma-separated list of finding families to surface. Findings in any other family are dropped before counts, annotations, comment, and the gate. Valid values: `duplicate-include`, `wrong-handler`, `dead-handler`, `duplicate-registration`, `conditional-registration`. Use `all` (or leave empty) to include every family. |
 | `jvm-heap` | no | `4g` | `-Xmx` for the analyzer JVM. |
-| `annotations` | no | `true` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. |
+| `annotations` | no | `false` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. Default off because uploading SARIF (see `sarif-path`) gives the same surface via GHAS Code Scanning; enabling both renders each finding twice on the same line. Turn back on when you do not upload SARIF (e.g. a private repo without GHAS). |
 | `comment-on-pr` | no | `true` | Post (and update in place on reruns) a sticky PR-level comment with file:line links. Requires `pull-requests: write`. |
 
 ## Outputs
@@ -73,6 +73,12 @@ opens:
    the diff.  GitHub silently truncates these after 10 per
    severity per workflow run, so they are best-effort; the sticky
    comment is authoritative.
+
+   **Off by default.**  When you upload SARIF (surface #4), GHAS
+   Code Scanning already renders inline annotations on the same
+   lines — emitting our own would duplicate them.  Set
+   `annotations: 'true'` to turn them back on when you do not
+   upload SARIF (e.g. a private repo without GHAS).
 3. **Job summary (Actions run page).**  The same table as the
    sticky comment, rendered at the top of the workflow run for
    maintainers reviewing the run itself.
