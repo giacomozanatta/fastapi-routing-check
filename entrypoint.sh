@@ -69,11 +69,30 @@ fi
 # ---------------------------------------------------------------------------
 FINDINGS_TSV="$WORKSPACE/$OUTPUT_DIR/findings.tsv"
 
-python3 - "$REPORT" "$FINDINGS_TSV" <<'PY'
-import json, re, sys
-report_path, tsv_path = sys.argv[1], sys.argv[2]
+python3 - "$REPORT" "$FINDINGS_TSV" "${FAMILIES:-all}" <<'PY'
+import json, os, re, sys
+report_path, tsv_path, families_arg = sys.argv[1], sys.argv[2], sys.argv[3]
 report = json.load(open(report_path))
 warnings = report.get("warnings") or []
+
+# Parse the FAMILIES input. Empty / "all" / "*" / missing => no filter.
+# Otherwise drop findings whose family is not in the enabled set.
+ALL_FAMILIES = {"duplicate-include", "wrong-handler", "dead-handler",
+                "duplicate-registration", "conditional-registration", "routing"}
+fams = families_arg.strip().lower()
+if fams in ("", "all", "*"):
+    enabled = None  # no filter
+else:
+    enabled = {f.strip() for f in fams.split(",") if f.strip()}
+    unknown = enabled - ALL_FAMILIES
+    if unknown:
+        print(f"::warning::Unknown family/families in input, ignored: {','.join(sorted(unknown))}",
+              file=sys.stderr)
+    enabled &= ALL_FAMILIES
+    if not enabled:
+        print("::warning::FAMILIES input resolved to an empty set; reporting all families instead.",
+              file=sys.stderr)
+        enabled = None
 
 SEV_RE   = re.compile(r"^\[[^\]]+\]\s*\[(HIGH|MEDIUM)\]\s*(.+)$", re.MULTILINE)
 # Two LOC patterns: the canonical "/workspace/<path>.py:line:col" used in
@@ -126,6 +145,11 @@ for w in warnings:
         continue
     sev, title = m.group(1), m.group(2).strip()
     fam = family_of(title)
+    # Apply the families filter as early as possible: drop the finding
+    # before its location is even resolved, so downstream counts,
+    # annotations, comment, and the gate all see the same filtered view.
+    if enabled is not None and fam not in enabled:
+        continue
     title = INTERNAL_ID_RE.sub("", title).strip()
     # Family-specific anchor selection: for duplicate-include the
     # right line is the (dead) include site in the body; for everything

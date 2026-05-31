@@ -31,6 +31,7 @@ A complete sample workflow is in
 | `output-dir` | no | `lisa-network-out` | Where `report.json` and `final-network.{txt,html,pdf}` are written. |
 | `fail-on-finding` | no | `true` | Fail the job when the routing checker reports findings. |
 | `severity-threshold` | no | `high` | `high` ignores medium findings for gating; `medium` fails on any finding. |
+| `families` | no | `all` | Comma-separated list of finding families to surface. Findings in any other family are dropped before counts, annotations, comment, and the gate. Valid values: `duplicate-include`, `wrong-handler`, `dead-handler`, `duplicate-registration`, `conditional-registration`. Use `all` (or leave empty) to include every family. |
 | `jvm-heap` | no | `4g` | `-Xmx` for the analyzer JVM. |
 | `annotations` | no | `true` | Emit `::warning file=,line=::` inline annotations on the Files Changed tab. |
 | `comment-on-pr` | no | `true` | Post (and update in place on reruns) a sticky PR-level comment with file:line links. Requires `pull-requests: write`. |
