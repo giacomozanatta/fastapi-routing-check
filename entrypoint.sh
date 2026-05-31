@@ -271,6 +271,69 @@ def sarif_level(sev: str) -> str:
     # surfaces HIGH/MEDIUM, so the mapping is total.
     return "error" if sev.upper() == "HIGH" else "warning"
 
+# Sections whose contents are pre-wrapped prose, not structured location
+# data — these get reflowed into one paragraph. Everything else (e.g.
+# "Include sites:", "Dead endpoint:", "Registration sites:") is kept
+# verbatim inside a fenced code block so the analyzer's intentional
+# layout (file:line locations, (runs)/(dead) tags) survives.
+_PROSE_HEADERS = {"what happens at runtime", "fix"}
+_SECTION_RE = re.compile(r"^(\s*)(\S.*?):\s*$")
+
+def body_to_markdown(body: str) -> str:
+    # LiSA's message bodies are pre-wrapped at ~70 columns for terminal
+    # display: hard newlines inside paragraphs that GHAS's HTML renderer
+    # respects literally, breaking prose into a ragged column. Rebuild
+    # the body as markdown so prose reflows into the alert-detail width
+    # while structured sections keep their fixed layout.
+    lines = body.rstrip().splitlines()
+    out, i, n = [], 0, len(lines)
+    # First non-blank line is the title-restated summary; emit as-is.
+    while i < n and not lines[i].strip():
+        i += 1
+    if i < n:
+        out.append(lines[i].strip())
+        i += 1
+    while i < n:
+        # Skip blank separators between sections.
+        while i < n and not lines[i].strip():
+            i += 1
+        if i >= n:
+            break
+        header_match = _SECTION_RE.match(lines[i])
+        if not header_match:
+            # Loose paragraph not preceded by a "Header:" line — reflow
+            # by collecting until the next blank line.
+            para = []
+            while i < n and lines[i].strip():
+                para.append(lines[i].strip())
+                i += 1
+            out.append("")
+            out.append(" ".join(para))
+            continue
+        header = header_match.group(2).strip()
+        i += 1
+        # Collect the indented content lines for this section.
+        content = []
+        while i < n and lines[i].strip():
+            content.append(lines[i])
+            i += 1
+        out.append("")
+        out.append(f"**{header}**")
+        out.append("")
+        if header.lower() in _PROSE_HEADERS:
+            out.append(" ".join(c.strip() for c in content))
+        else:
+            # Strip the minimum common indent so the code block starts at
+            # column 0 but preserves relative indentation (e.g. the
+            # "    GET /path\n       declared at ...:Line:Col" layout).
+            non_empty = [c for c in content if c.strip()]
+            min_indent = min((len(c) - len(c.lstrip()) for c in non_empty), default=0)
+            out.append("```")
+            for c in content:
+                out.append(c[min_indent:] if len(c) >= min_indent else c)
+            out.append("```")
+    return "\n".join(out).strip() + "\n"
+
 def sarif_result(sev, fam, fpath, fline, title, body):
     # partialFingerprints lets GitHub Code Scanning dedupe the same defect
     # across re-runs even when line numbers drift (e.g. unrelated edits
@@ -282,7 +345,15 @@ def sarif_result(sev, fam, fpath, fline, title, body):
     result = {
         "ruleId": fam,
         "level": sarif_level(sev),
-        "message": {"text": body.strip()},
+        # GHAS renders message.markdown when present, falls back to .text.
+        # We keep .text as the raw analyzer body for non-GitHub SARIF
+        # consumers (VS Code SARIF Viewer, sarifweb.azurewebsites.net,
+        # etc.) and provide a reflowed markdown variant for the Code
+        # Scanning alert detail view.
+        "message": {
+            "text": body.strip(),
+            "markdown": body_to_markdown(body),
+        },
         "partialFingerprints": {"primaryLocationLineHash": fp},
         "properties": {"severity": sev.lower()},
     }
@@ -303,7 +374,12 @@ sarif = {
     "runs": [{
         "tool": {
             "driver": {
-                "name": "fastapi-routing-check",
+                # Display name shown in the GHAS Code Scanning UI
+                # ("GitHub Advanced Security / LiSA FastAPI Routing
+                # Checker") and in each alert's "Tool" column. Stays
+                # human-readable; the stable slug used for Code Scanning
+                # category / dedup lives in automationDetails.id below.
+                "name": "LiSA FastAPI Routing Checker",
                 "informationUri": "https://github.com/giacomozanatta/fastapi-routing-check",
                 "version": tool_version,
                 "rules": RULES,

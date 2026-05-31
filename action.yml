@@ -34,9 +34,9 @@ inputs:
     required: false
     default: '4g'
   annotations:
-    description: 'Emit ::warning file=,line=:: workflow commands so findings appear as inline annotations on the Files Changed tab of the PR. Capped by GitHub at 10 per severity per run.'
+    description: 'Emit ::warning file=,line=:: workflow commands so findings appear as inline annotations on the Files Changed tab of the PR. Capped by GitHub at 10 per severity per run. Default off: when SARIF is uploaded to Code Scanning (see sarif-path), GHAS already renders inline annotations on the same lines, so emitting our own would duplicate them. Set to true if you do not upload SARIF (e.g. private repo without GHAS) and want inline annotations on the Files Changed tab.'
     required: false
-    default: 'true'
+    default: 'false'
   comment-on-pr:
     description: 'Post (or update) a sticky comment on the PR with a markdown table linking each finding to file:line on the analysed commit. Requires GITHUB_TOKEN with pull-requests:write.'
     required: false
