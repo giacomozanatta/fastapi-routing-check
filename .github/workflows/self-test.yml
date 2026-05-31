@@ -30,7 +30,7 @@ jobs:
         with:
           main-file: test/fixture/app/main.py
           project-dir: test/fixture
-          fail-on-finding: 'false'
+          fail-on-finding: 'true'
 
       - name: Verify outputs
         run: |
