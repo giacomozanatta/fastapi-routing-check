@@ -25,6 +25,10 @@ inputs:
     description: 'Only fail on findings at or above this severity (high | medium). With "high", medium-severity findings are surfaced as annotations but do not fail the job.'
     required: false
     default: 'high'
+  families:
+    description: 'Comma-separated list of finding families to surface. Findings in any other family are dropped before counts, annotations, comment, and the gate. Default reports all five; set e.g. "duplicate-include,wrong-handler" to suppress the rest. Valid values: duplicate-include, wrong-handler, dead-handler, duplicate-registration, conditional-registration. Use "all" or leave empty to include every family.'
+    required: false
+    default: 'all'
   jvm-heap:
     description: 'Max JVM heap for the analyzer (passed as -Xmx). Default 4g matches the per-run budget used in the empirical study.'
     required: false
@@ -70,6 +74,7 @@ runs:
         OUTPUT_DIR: ${{ inputs.output-dir }}
         FAIL_ON_FINDING: ${{ inputs.fail-on-finding }}
         SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        FAMILIES: ${{ inputs.families }}
         JVM_HEAP: ${{ inputs.jvm-heap }}
         ANNOTATIONS: ${{ inputs.annotations }}
         COMMENT_ON_PR: ${{ inputs.comment-on-pr }}

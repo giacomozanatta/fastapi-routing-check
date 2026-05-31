@@ -38,7 +38,7 @@ jobs:
           name: lisa-network-report
           path: |
             lisa-network-out/report.json
-            lisa-network-out/final-network.html
+            lisa-network-out/final-network.pdf
             lisa-network-out/final-network.txt
 
       - name: Summary

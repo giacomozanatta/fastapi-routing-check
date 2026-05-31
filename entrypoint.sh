@@ -69,11 +69,30 @@ fi
 # ---------------------------------------------------------------------------
 FINDINGS_TSV="$WORKSPACE/$OUTPUT_DIR/findings.tsv"
 
-python3 - "$REPORT" "$FINDINGS_TSV" <<'PY'
-import json, re, sys
-report_path, tsv_path = sys.argv[1], sys.argv[2]
+python3 - "$REPORT" "$FINDINGS_TSV" "${FAMILIES:-all}" <<'PY'
+import json, os, re, sys
+report_path, tsv_path, families_arg = sys.argv[1], sys.argv[2], sys.argv[3]
 report = json.load(open(report_path))
 warnings = report.get("warnings") or []
+
+# Parse the FAMILIES input. Empty / "all" / "*" / missing => no filter.
+# Otherwise drop findings whose family is not in the enabled set.
+ALL_FAMILIES = {"duplicate-include", "wrong-handler", "dead-handler",
+                "duplicate-registration", "conditional-registration", "routing"}
+fams = families_arg.strip().lower()
+if fams in ("", "all", "*"):
+    enabled = None  # no filter
+else:
+    enabled = {f.strip() for f in fams.split(",") if f.strip()}
+    unknown = enabled - ALL_FAMILIES
+    if unknown:
+        print(f"::warning::Unknown family/families in input, ignored: {','.join(sorted(unknown))}",
+              file=sys.stderr)
+    enabled &= ALL_FAMILIES
+    if not enabled:
+        print("::warning::FAMILIES input resolved to an empty set; reporting all families instead.",
+              file=sys.stderr)
+        enabled = None
 
 SEV_RE   = re.compile(r"^\[[^\]]+\]\s*\[(HIGH|MEDIUM)\]\s*(.+)$", re.MULTILINE)
 # Two LOC patterns: the canonical "/workspace/<path>.py:line:col" used in
@@ -85,6 +104,18 @@ SEV_RE   = re.compile(r"^\[[^\]]+\]\s*\[(HIGH|MEDIUM)\]\s*(.+)$", re.MULTILINE)
 # render — repo-relative.
 LOC_RE       = re.compile(r"(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):(\d+)")
 LOC_QUOTED   = re.compile(r"'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
+# For duplicate-include findings the message body lists every include
+# site with a (runs)/(dead) tag, e.g.
+#   "Include sites:
+#       (runs)  'app/main.py':36:49
+#       (dead)  'app/main.py':37:49"
+# The (dead) site is the redundant include the developer should delete,
+# so it is the right annotation anchor — without this override the
+# parser would otherwise grab the router-allocation site baked into
+# the title (heap[s]:pp@'...':14:25), pointing at the APIRouter() call
+# rather than the duplicate include_router(...) line.
+DEAD_INC_RE  = re.compile(r"\(dead\)\s+'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
+ANY_INC_RE   = re.compile(r"\((?:runs|dead)\)\s+'(?:/workspace/)?([^']+\.py)':(\d+):(\d+)")
 FAMILY_KEYS = [
     ("wrong handler",            "wrong-handler"),
     ("duplicate include",        "duplicate-include"),
@@ -114,8 +145,20 @@ for w in warnings:
         continue
     sev, title = m.group(1), m.group(2).strip()
     fam = family_of(title)
+    # Apply the families filter as early as possible: drop the finding
+    # before its location is even resolved, so downstream counts,
+    # annotations, comment, and the gate all see the same filtered view.
+    if enabled is not None and fam not in enabled:
+        continue
     title = INTERNAL_ID_RE.sub("", title).strip()
-    loc = LOC_RE.search(msg) or LOC_QUOTED.search(msg)
+    # Family-specific anchor selection: for duplicate-include the
+    # right line is the (dead) include site in the body; for everything
+    # else the first :line: reference in the message is correct.
+    loc = None
+    if fam == "duplicate-include":
+        loc = DEAD_INC_RE.search(msg) or ANY_INC_RE.search(msg)
+    if loc is None:
+        loc = LOC_RE.search(msg) or LOC_QUOTED.search(msg)
     # Use "-" as a sentinel for "unresolved" so bash `read` with IFS=$'\t'
     # does not collapse the empty field (tab is whitespace; consecutive
     # whitespace IFS chars are treated as a single delimiter).
@@ -136,9 +179,62 @@ high_count=$(awk -F'\t' 'tolower($1)=="high"' "$FINDINGS_TSV" | wc -l | tr -d ' 
 medium_count=$(awk -F'\t' 'tolower($1)=="medium"' "$FINDINGS_TSV" | wc -l | tr -d ' ')
 
 endpoints_count="0"
+ENDPOINTS_TSV="$WORKSPACE/$OUTPUT_DIR/endpoints.tsv"
+: > "$ENDPOINTS_TSV"
 if [[ -f "$FINAL_TXT" ]]; then
   endpoints_count=$(grep -Eo 'COUNT[[:space:]]*[:=][[:space:]]*[0-9]+' "$FINAL_TXT" \
     | head -n1 | grep -Eo '[0-9]+' || echo 0)
+  # Parse the per-method endpoint listing out of final-network.txt.
+  # Layout:
+  #   COUNT: N
+  #   GET: K
+  #       /api/v1/items/featured: app/main.py:22:25
+  #       /api/v1/items/{item_id}: app/main.py:22:25
+  #   POST: M
+  #       ...
+  #   (blank line ends the endpoint section; the rest of the file
+  #    holds unrelated UNREACHABLE ROUTES / DUPLICATE include_router
+  #    REGISTRATIONS sections.)
+  # We emit one row per (method, path) into endpoints.tsv with columns
+  #   method \t path \t fpath \t fline
+  # using "-" as the sentinel for "unresolved path" so bash read does
+  # not collapse empty fields under whitespace-only IFS.
+  python3 - "$FINAL_TXT" "$ENDPOINTS_TSV" <<'PY'
+import re, sys
+in_path, out_path = sys.argv[1], sys.argv[2]
+method_re   = re.compile(r"^([A-Z]+):\s*\d+\s*$")
+endpoint_re = re.compile(r"^\s+(\S.+?):\s*(?:/workspace/)?([\S][^\s:'\"]*\.py):(\d+):\d+\s*$")
+current = None
+rows = []
+seen = set()  # de-dup identical (method, path, file, line) lines
+with open(in_path, encoding="utf-8", errors="replace") as f:
+    for raw in f:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            if current is not None:
+                # blank line after we entered the listing -> end of section
+                break
+            continue
+        m = method_re.match(line)
+        if m:
+            current = m.group(1)
+            continue
+        if current is None:
+            continue
+        em = endpoint_re.match(line)
+        if not em:
+            continue
+        path, fpath, fline = em.group(1).strip(), em.group(2), em.group(3)
+        key = (current, path, fpath, fline)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((current, path, fpath, fline))
+with open(out_path, "w") as f:
+    for r in rows:
+        f.write("\t".join(r) + "\n")
+print(f"parsed {len(rows)} endpoints -> {out_path}", file=sys.stderr)
+PY
 fi
 
 {
@@ -173,6 +269,26 @@ fi
       echo "| $sev | $fam | $where | $title |"
     done < "$FINDINGS_TSV"
   fi
+
+  # Collapsible endpoint inventory — always emitted when at least one
+  # endpoint was recovered, so reviewers can audit the topology the
+  # checker reasoned over without downloading final-network.txt.
+  if [[ -s "$ENDPOINTS_TSV" ]]; then
+    n_ep=$(wc -l < "$ENDPOINTS_TSV" | tr -d ' ')
+    echo
+    echo "<details>"
+    echo "<summary>All endpoints ($n_ep)</summary>"
+    echo
+    echo "| Method | Path | Source |"
+    echo "|---|---|---|"
+    while IFS=$'\t' read -r method epath efpath efline; do
+      esrc="\`$efpath:$efline\`"
+      [[ "$efpath" == "-" || -z "$efpath" ]] && esrc="(unresolved)"
+      echo "| $method | \`$epath\` | $esrc |"
+    done < "$ENDPOINTS_TSV"
+    echo
+    echo "</details>"
+  fi
 } >> "$GITHUB_STEP_SUMMARY"
 
 # ---------------------------------------------------------------------------
@@ -203,7 +319,18 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
   if ! command -v gh >/dev/null 2>&1; then
     echo "::warning::gh CLI not available in this runner; skipping PR comment."
   else
-    PR_NUMBER="${GITHUB_REF##*/}"; PR_NUMBER="${PR_NUMBER%/merge}"
+    # Pull the PR number from the event payload — robust across PR
+    # event subtypes (opened/synchronize/reopened) and unaffected by
+    # GITHUB_REF's "refs/pull/N/merge" shape that an earlier version of
+    # this script tried (and failed) to parse.
+    PR_NUMBER=""
+    if [[ -n "${GITHUB_EVENT_PATH:-}" && -f "$GITHUB_EVENT_PATH" ]]; then
+      PR_NUMBER=$(jq -r '.pull_request.number // .number // empty' "$GITHUB_EVENT_PATH")
+    fi
+    if [[ -z "$PR_NUMBER" || ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+      echo "::warning::Could not resolve PR number from event payload; skipping PR comment."
+      PR_NUMBER=""
+    fi
     REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
     SHA="${GITHUB_SHA}"  # commit being analysed — file links pin to it
     MARKER="<!-- fastapi-routing-check -->"
@@ -211,11 +338,8 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
     BODY_FILE="$WORKSPACE/$OUTPUT_DIR/pr-comment.md"
     {
       echo "$MARKER"
-      echo "<table><tr>"
-      echo "<td><img src=\"https://raw.githubusercontent.com/lisa-analyzer/lisa/main/.github/lisa-logo.png\" width=\"64\" alt=\"Lisa\"></td>"
-      echo "<td><h3>Lisa &mdash; FastAPI routing check</h3>"
-      echo "<sub>Static analysis by <a href=\"https://github.com/lisa-analyzer/lisa\">LiSA</a> via <a href=\"https://github.com/giacomozanatta/fastapi-routing-check\">fastapi-routing-check</a></sub></td>"
-      echo "</tr></table>"
+      echo "### Lisa &mdash; FastAPI routing check"
+      echo "<sub>Static analysis by <a href=\"https://github.com/lisa-analyzer/lisa\">LiSA</a> via <a href=\"https://github.com/giacomozanatta/fastapi-routing-check\">fastapi-routing-check</a></sub>"
       echo
       if (( findings_count == 0 )); then
         echo ":white_check_mark: No routing defects detected across **$endpoints_count** recovered endpoints."
@@ -236,15 +360,33 @@ if [[ "${COMMENT_ON_PR:-true}" == "true" && "${GITHUB_EVENT_NAME:-}" == "pull_re
           icon=":small_red_triangle:"; [[ "$sev_lc" == "medium" ]] && icon=":small_orange_diamond:"
           echo "| $icon $sev | $fam | $where | $esc_title |"
         done < "$FINDINGS_TSV"
+      fi
+
+      # Collapsible endpoint inventory — emitted in both the
+      # "no findings" and "findings" branches so reviewers can audit
+      # the topology the checker reasoned over.
+      if [[ -s "$ENDPOINTS_TSV" ]]; then
+        n_ep=$(wc -l < "$ENDPOINTS_TSV" | tr -d ' ')
         echo
-        echo "<details><summary>Full report (collapsed)</summary>"
+        echo "<details>"
+        echo "<summary>All endpoints ($n_ep)</summary>"
         echo
-        echo "Download \`lisa-network-report\` from this run's artefacts for the complete \`report.json\`, \`final-network.html\`, and \`final-network.txt\`."
+        echo "| Method | Path | Source |"
+        echo "|---|---|---|"
+        while IFS=$'\t' read -r method epath efpath efline; do
+          if [[ "$efpath" == "-" || -z "$efpath" ]]; then
+            esrc="(unresolved)"
+          else
+            esrc="[\`$efpath:$efline\`]($REPO_URL/blob/$SHA/$efpath#L$efline)"
+          fi
+          esc_path=$(printf '%s' "$epath" | sed 's/|/\\|/g')
+          echo "| \`$method\` | \`$esc_path\` | $esrc |"
+        done < "$ENDPOINTS_TSV"
         echo
         echo "</details>"
       fi
       echo
-      echo "_<sub>Lisa &middot; run <a href=\"$REPO_URL/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_ID}</a> &middot; commit <code>${SHA:0:7}</code></sub>_"
+      echo "_<sub>Lisa &middot; full \`report.json\`, \`final-network.pdf\`, and \`final-network.txt\` available as \`lisa-network-report\` on run <a href=\"$REPO_URL/actions/runs/${GITHUB_RUN_ID}\">#${GITHUB_RUN_ID}</a> &middot; commit <code>${SHA:0:7}</code></sub>_"
     } > "$BODY_FILE"
 
     # Find an existing sticky comment (by sentinel) and edit it; otherwise create one.
